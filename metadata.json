@@ -1,0 +1,6 @@
+{
+  "name": "Gui Produtividade",
+  "description": "Assistente virtual inteligente com Gemini Flash para chat diário, agenda, tarefas Kanban, hábitos personalizáveis e triagem de e-mails urgentes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

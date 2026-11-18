@@ -1,15 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AgendaView } from './components/AgendaView';
+import { AuthWelcomeScreen } from './components/AuthWelcomeScreen';
 import { ChatHomeView } from './components/ChatHomeView';
 import { ConfirmationModal } from './components/ConfirmationModal';
 import { EmailsView } from './components/EmailsView';
 import { HabitsView } from './components/HabitsView';
 import { KanbanView } from './components/KanbanView';
+import { OnboardingTutorialModal } from './components/OnboardingTutorialModal';
+import { SettingsAndInstallView } from './components/SettingsAndInstallView';
 import { SidebarMenu } from './components/SidebarMenu';
 import { TopBar } from './components/TopBar';
 import { WeeklyHistoryView } from './components/WeeklyHistoryView';
 import { createInitialWorkspaceState } from './data/seedData';
 import {
+  loadWorkspaceFromFirestore,
+  pickLocalSaveFile,
+  saveWorkspaceToFirestore,
+  writeToConnectedLocalFile,
+} from './services/cloudDatabase';
+import {
+  getSavedUserProfile,
   getWorkspaceAccessToken,
   initWorkspaceAuth,
   signInWithGoogleWorkspace,
@@ -30,10 +40,16 @@ import {
   EmailMessage,
   HabitItem,
   PendingCalendarConfirmation,
+  RoutinePreferences,
   TaskItem,
   TaskStatus,
+  UserProfile,
   WorkspaceState,
 } from './types';
+import {
+  dispatchSystemNotification,
+  registerGuiServiceWorker,
+} from './utils/notifications';
 import {
   addDaysToKey,
   buildUpcomingReminders,
@@ -41,7 +57,12 @@ import {
   prioritizeEmailsHeuristic,
 } from './utils/productivity';
 
-const LOCAL_STORAGE_KEY = 'gui_produtividade_state_v1';
+const LEGACY_STORAGE_KEY = 'gui_produtividade_state_v1';
+const STORAGE_PREFIX = 'gui_produtividade_clean_v2_';
+
+function getStorageKeyForUser(userId: string): string {
+  return `${STORAGE_PREFIX}${userId}`;
+}
 
 interface ModalConfirmationState {
   open: boolean;
@@ -54,9 +75,20 @@ interface ModalConfirmationState {
   onConfirm: () => Promise<void> | void;
 }
 
-function loadLocalInitialState(): WorkspaceState {
+function loadUserInitialState(user: UserProfile | null): WorkspaceState {
+  // Always clean legacy v1 demo data so user starts from zero
   try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_STORAGE_KEY);
+  } catch {
+    // Ignore
+  }
+
+  if (!user) {
+    return createInitialWorkspaceState();
+  }
+
+  try {
+    const raw = localStorage.getItem(getStorageKeyForUser(user.id));
     if (raw) {
       const parsed = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.tasks) && Array.isArray(parsed.habits)) {
@@ -64,16 +96,18 @@ function loadLocalInitialState(): WorkspaceState {
       }
     }
   } catch {
-    // Fallback to deterministic seed
+    // Fallback to clean empty state
   }
-  return createInitialWorkspaceState();
+  return createInitialWorkspaceState(user.name);
 }
 
 export default function App() {
-  const [state, setState] = useState<WorkspaceState>(() => loadLocalInitialState());
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => getSavedUserProfile());
+  const [state, setState] = useState<WorkspaceState>(() => loadUserInitialState(getSavedUserProfile()));
   const [activeSection, setActiveSection] = useState<AppSection>('chat');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [tutorialOpen, setTutorialOpen] = useState(false);
 
   const [isSendingChat, setIsSendingChat] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
@@ -82,17 +116,16 @@ export default function App() {
   const [triageError, setTriageError] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  const [googleUser, setGoogleUser] = useState<{
-    name: string;
-    email: string;
-    photoURL?: string;
-  } | null>(null);
-
   const [modalConfirm, setModalConfirm] = useState<ModalConfirmationState | null>(null);
 
-  const hydratedRef = useRef(false);
+  const hydratedUserRef = useRef<string | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  // Register Service Worker for PWA & System Notifications on mount
+  useEffect(() => {
+    registerGuiServiceWorker();
+  }, []);
 
   useEffect(() => {
     window.scrollTo({ top: 0 });
@@ -102,46 +135,100 @@ export default function App() {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage((prev) => (prev === msg ? null : prev));
-    }, 3600);
+    }, 3800);
   }, []);
 
-  // Hydrate from server JSON store if no custom local edits exist yet
+  // Listen for Firebase / Google Auth state
   useEffect(() => {
+    const unsubscribe = initWorkspaceAuth(
+      (user) => {
+        setCurrentUser((prev) => (prev?.id === user.id ? prev : user));
+      },
+      () => {
+        // Keep null if signed out
+      }
+    );
+    return unsubscribe;
+  }, []);
+
+  // Hydrate user workspace from SQLite server DB and Firestore Cloud DB when user logs in
+  useEffect(() => {
+    if (!currentUser) {
+      hydratedUserRef.current = null;
+      return;
+    }
+
     let cancelled = false;
-    fetch('/api/state')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
+    const userId = currentUser.id;
+    const localKey = getStorageKeyForUser(userId);
+
+    async function hydrateUserWorkspace() {
+      try {
+        const [serverRes, cloudState] = await Promise.all([
+          fetch(`/api/state?userId=${encodeURIComponent(userId)}`)
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null),
+          loadWorkspaceFromFirestore(userId),
+        ]);
+
         if (cancelled) return;
-        if (data?.state && !localStorage.getItem(LOCAL_STORAGE_KEY)) {
-          setState(data.state);
+
+        const serverState: WorkspaceState | null = serverRes?.state ?? null;
+        const localRaw = localStorage.getItem(localKey);
+        const localState: WorkspaceState | null = localRaw ? JSON.parse(localRaw) : null;
+
+        // Pick the richest/newest state among Cloud, SQLite Server, and LocalStorage
+        const resolved =
+          cloudState ||
+          serverState ||
+          localState ||
+          createInitialWorkspaceState(currentUser?.name);
+
+        setState(resolved);
+        hydratedUserRef.current = userId;
+
+        if (!resolved.onboardingCompleted) {
+          setTutorialOpen(true);
         }
-        hydratedRef.current = true;
-      })
-      .catch(() => {
-        hydratedRef.current = true;
-      });
+      } catch {
+        if (!cancelled) {
+          hydratedUserRef.current = userId;
+        }
+      }
+    }
+
+    hydrateUserWorkspace();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [currentUser]);
 
-  // Persist to localStorage & server on every state update
+  // Persist to LocalStorage, SQLite Server DB, Firestore Cloud, and Connected Local File on every state update
   useEffect(() => {
+    if (!currentUser) return;
+    const userId = currentUser.id;
+
     try {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(getStorageKeyForUser(userId), JSON.stringify(state));
     } catch {
-      // Ignore storage quota errors
+      // Ignore quota errors
     }
-    if (!hydratedRef.current) return;
+
+    if (hydratedUserRef.current !== userId) return;
+
     const timer = setTimeout(() => {
       fetch('/api/state', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state }),
+        body: JSON.stringify({ userId, state }),
       }).catch(() => {});
-    }, 250);
+
+      saveWorkspaceToFirestore(userId, state).catch(() => {});
+      writeToConnectedLocalFile(state).catch(() => {});
+    }, 300);
+
     return () => clearTimeout(timer);
-  }, [state]);
+  }, [state, currentUser]);
 
   // Helper to append activity log entry
   const appendActivity = useCallback(
@@ -161,6 +248,10 @@ export default function App() {
   // Triage emails with Gemini Flash (falls back to heuristic if API unavailable)
   const prioritizeEmails = useCallback(
     async (inputEmails: EmailMessage[]) => {
+      if (inputEmails.length === 0) {
+        showToast('Sincronize seu Gmail primeiro para priorizar seus e-mails.');
+        return;
+      }
       setIsTriagingAi(true);
       setTriageError(null);
       try {
@@ -225,7 +316,10 @@ export default function App() {
   // Sync Google Calendar & Gmail
   const syncGoogleWorkspaceData = useCallback(async () => {
     const token = getWorkspaceAccessToken();
-    if (!token) return;
+    if (!token) {
+      showToast('Conecte sua conta Google primeiro para sincronizar Agenda e Gmail.');
+      return;
+    }
 
     setIsSyncingGoogle(true);
     try {
@@ -258,41 +352,20 @@ export default function App() {
     }
   }, [prioritizeEmails, showToast]);
 
-  // Listen for Firebase Workspace Auth state
-  useEffect(() => {
-    const unsubscribe = initWorkspaceAuth(
-      (user) => {
-        setGoogleUser({
-          name: user.displayName || user.email || 'Usuário',
-          email: user.email || '',
-          photoURL: user.photoURL || undefined,
-        });
-      },
-      () => {
-        setGoogleUser(null);
-      }
-    );
-    return unsubscribe;
-  }, []);
-
   const handleGoogleSignIn = async () => {
     try {
       const { user } = await signInWithGoogleWorkspace();
-      setGoogleUser({
-        name: user.displayName || user.email || 'Usuário',
-        email: user.email || '',
-        photoURL: user.photoURL || undefined,
-      });
+      setCurrentUser(user);
       await syncGoogleWorkspaceData();
     } catch (err: any) {
       showToast(err?.message || 'Login com Google cancelado ou falhou.');
     }
   };
 
-  const handleGoogleSignOut = async () => {
+  const handleSignOut = async () => {
     await signOutGoogleWorkspace();
-    setGoogleUser(null);
-    showToast('Conta Google desconectada.');
+    setCurrentUser(null);
+    showToast('Você saiu da sua conta.');
   };
 
   // Send message to Gui (Gemini Flash)
@@ -461,19 +534,22 @@ export default function App() {
 
   // Automatic time-based check-ins (09:00, 17:40, Sunday, and smart reminders)
   useEffect(() => {
+    if (!currentUser) return;
+
     const checkRoutines = () => {
       const now = new Date();
       const todayKey = formatDateKey(now);
       const mins = now.getHours() * 60 + now.getMinutes();
       const current = stateRef.current;
+      const windowMins = current.preferences.smartRemindersMinutesBefore || 15;
 
-      // Refresh smart upcoming event reminders
+      // Refresh smart upcoming event & task reminders
       const computedReminders = buildUpcomingReminders(
         current.events,
         current.tasks,
         current.emails,
         now,
-        60
+        windowMins
       );
 
       setState((prev) => {
@@ -481,9 +557,12 @@ export default function App() {
         const brandNew = computedReminders.filter((r) => !existingIds.has(r.id));
         if (brandNew.length === 0) return prev;
 
-        if (prev.preferences.browserNotificationsEnabled && 'Notification' in window && Notification.permission === 'granted') {
+        if (prev.preferences.browserNotificationsEnabled) {
           for (const notif of brandNew.slice(0, 2)) {
-            new Notification(notif.title, { body: notif.body });
+            dispatchSystemNotification(notif.title, notif.body, {
+              playSound: prev.preferences.soundNotificationsEnabled !== false,
+              tag: notif.id,
+            });
           }
         }
         return {
@@ -492,19 +571,58 @@ export default function App() {
         };
       });
 
-      // Automatic 17:40 check-in if current time >= 17:40 and not yet run today
-      const [eh, em] = current.preferences.eveningTime.split(':').map(Number);
+      // Automatic Morning Check-in notification
+      const [mh, mm] = (current.preferences.morningTime || '09:00').split(':').map(Number);
+      const morningMins = (mh || 9) * 60 + (mm || 0);
+      const morningKey = `morning_${todayKey}`;
+      if (mins >= morningMins && mins <= morningMins + 60 && !current.lastRoutineRun[morningKey]) {
+        const title = `Check-in Matinal (${current.preferences.morningTime})`;
+        const body = 'Bom dia! Hora de revisar sua agenda e prioridades de hoje com o Gui.';
+        if (current.preferences.browserNotificationsEnabled) {
+          dispatchSystemNotification(title, body, {
+            playSound: current.preferences.soundNotificationsEnabled !== false,
+            tag: morningKey,
+          });
+        }
+        setState((prev) => ({
+          ...prev,
+          lastRoutineRun: { ...prev.lastRoutineRun, [morningKey]: now.toISOString() },
+          notifications: [
+            {
+              id: `notif-0900-${todayKey}`,
+              title,
+              body,
+              time: current.preferences.morningTime,
+              type: 'routine_0900',
+              read: false,
+              createdAt: now.toISOString(),
+            },
+            ...prev.notifications,
+          ],
+        }));
+      }
+
+      // Automatic 17:40 Evening Review notification
+      const [eh, em] = (current.preferences.eveningTime || '17:40').split(':').map(Number);
       const eveningMins = (eh || 17) * 60 + (em || 40);
       const eveningKey = `evening_${todayKey}`;
       if (mins >= eveningMins && !current.lastRoutineRun[eveningKey]) {
+        const title = `Revisão das ${current.preferences.eveningTime} do Gui`;
+        const body = 'Hora de checar o que foi concluído hoje e ajustar pendências.';
+        if (current.preferences.browserNotificationsEnabled) {
+          dispatchSystemNotification(title, body, {
+            playSound: current.preferences.soundNotificationsEnabled !== false,
+            tag: eveningKey,
+          });
+        }
         setState((prev) => ({
           ...prev,
           lastRoutineRun: { ...prev.lastRoutineRun, [eveningKey]: now.toISOString() },
           notifications: [
             {
               id: `notif-1740-${todayKey}`,
-              title: 'Revisão das 17:40 do Gui',
-              body: 'Hora de checar o que foi concluído hoje e ajustar pendências.',
+              title,
+              body,
               time: current.preferences.eveningTime,
               type: 'routine_1740',
               read: false,
@@ -538,9 +656,9 @@ export default function App() {
     };
 
     checkRoutines();
-    const timer = setInterval(checkRoutines, 30000);
+    const timer = setInterval(checkRoutines, 20000);
     return () => clearInterval(timer);
-  }, []);
+  }, [currentUser]);
 
   // Calendar event creation & deletion (always gated by explicit user confirmation!)
   const executeCreateEvent = async (payload: {
@@ -584,10 +702,16 @@ export default function App() {
         ...prev.activities,
       ],
     }));
-    showToast(`Evento "${newEvent.title}" adicionado à agenda!`);
+    showToast(`Evento "${newEvent.title}" salvo no banco de dados!`);
   };
 
-  const executeDeleteEvent = async (event: { id?: string; googleEventId?: string; title: string; date: string; startTime: string }) => {
+  const executeDeleteEvent = async (event: {
+    id?: string;
+    googleEventId?: string;
+    title: string;
+    date: string;
+    startTime: string;
+  }) => {
     const token = getWorkspaceAccessToken();
     if (token && event.googleEventId) {
       await deleteGoogleCalendarEvent(event.googleEventId);
@@ -666,13 +790,14 @@ export default function App() {
     description: string;
     color: CardColorTheme;
   }) => {
+    const hasGoogleToken = Boolean(getWorkspaceAccessToken());
     setModalConfirm({
       open: true,
       action: 'create_event',
       title: 'Confirmar novo evento na Agenda?',
-      description: googleUser
-        ? 'Este compromisso será adicionado ao seu Google Calendar.'
-        : 'Este compromisso será salvo na sua agenda do Gui.',
+      description: hasGoogleToken
+        ? 'Este compromisso será adicionado ao seu Google Calendar e salvo no banco de dados.'
+        : 'Este compromisso será salvo na sua agenda e no banco de dados do Gui.',
       confirmLabel: 'Confirmar e Agendar',
       destructive: false,
       details: [
@@ -715,7 +840,7 @@ export default function App() {
   const handleCreateTask = (task: Omit<TaskItem, 'id' | 'createdAt'>) => {
     const newTask: TaskItem = {
       ...task,
-      id: `task-${Date.now()}`,
+      id: `task-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
       createdAt: new Date().toISOString(),
     };
     setState((prev) => ({
@@ -731,7 +856,7 @@ export default function App() {
         ...prev.activities,
       ],
     }));
-    showToast(`Tarefa "${newTask.title}" adicionada ao Kanban!`);
+    showToast(`Tarefa "${newTask.title}" salva no Kanban!`);
   };
 
   const handleMoveTask = (taskId: string, nextStatus: TaskStatus) => {
@@ -799,7 +924,7 @@ export default function App() {
   const handleCreateHabit = (habit: Omit<HabitItem, 'id' | 'logs' | 'createdAt'>) => {
     const newHabit: HabitItem = {
       ...habit,
-      id: `hab-${Date.now()}`,
+      id: `hab-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
       logs: {},
       createdAt: formatDateKey(new Date()),
     };
@@ -807,7 +932,7 @@ export default function App() {
       ...prev,
       habits: [...prev.habits, newHabit],
     }));
-    showToast(`Hábito "${newHabit.name}" criado!`);
+    showToast(`Hábito "${newHabit.name}" criado e salvo!`);
   };
 
   const handleUpdateHabit = (
@@ -828,28 +953,58 @@ export default function App() {
     }));
   };
 
+  const handleUpdatePreferences = (patch: Partial<RoutinePreferences>) => {
+    setState((prev) => ({
+      ...prev,
+      preferences: { ...prev.preferences, ...patch },
+    }));
+  };
+
   const handleToggleBrowserNotifications = async () => {
-    if (!('Notification' in window)) {
-      showToast('Este navegador não suporta notificações nativas.');
-      return;
-    }
     if (!state.preferences.browserNotificationsEnabled) {
-      const perm = await Notification.requestPermission();
-      if (perm !== 'granted') {
-        showToast('Permissão de notificação negada pelo navegador.');
-        return;
-      }
+      const ok = await dispatchSystemNotification(
+        'Notificações do Gui Ativadas! 🔔',
+        'Você receberá lembretes de compromissos e check-ins diários.',
+        { playSound: true }
+      );
       setState((prev) => ({
         ...prev,
-        preferences: { ...prev.preferences, browserNotificationsEnabled: true },
+        preferences: {
+          ...prev.preferences,
+          browserNotificationsEnabled: true,
+          soundNotificationsEnabled: true,
+        },
       }));
-      showToast('Alertas inteligentes do navegador ativados!');
+      showToast(
+        ok
+          ? 'Alertas nativos e sonoros ativados!'
+          : 'Alertas sonoros ativos! Permita notificações no navegador se desejar pop-ups.'
+      );
     } else {
       setState((prev) => ({
         ...prev,
         preferences: { ...prev.preferences, browserNotificationsEnabled: false },
       }));
+      showToast('Notificações automáticas pausadas.');
     }
+  };
+
+  const handleResetAllData = async () => {
+    if (!currentUser) return;
+    const clean = {
+      ...createInitialWorkspaceState(currentUser.name),
+      onboardingCompleted: true,
+    };
+    setState(clean);
+    try {
+      localStorage.setItem(getStorageKeyForUser(currentUser.id), JSON.stringify(clean));
+    } catch {
+      // Ignore
+    }
+    await fetch(`/api/state?userId=${encodeURIComponent(currentUser.id)}`, {
+      method: 'DELETE',
+    }).catch(() => {});
+    showToast('Todos os dados foram limpos! Você está começando 100% do zero.');
   };
 
   const sidebarCounts = useMemo(() => {
@@ -863,12 +1018,37 @@ export default function App() {
     };
   }, [state.tasks, state.events, state.habits, state.emails]);
 
+  // If user is not authenticated yet, show the Opening Login Screen
+  if (!currentUser) {
+    return (
+      <AuthWelcomeScreen
+        onAuthenticated={(user) => {
+          setCurrentUser(user);
+          const initial = loadUserInitialState(user);
+          setState(initial);
+          if (!initial.onboardingCompleted) {
+            setTutorialOpen(true);
+          }
+          if (user.authProvider === 'google' && getWorkspaceAccessToken()) {
+            setTimeout(() => {
+              syncGoogleWorkspaceData();
+            }, 400);
+          }
+        }}
+      />
+    );
+  }
+
+  const isGoogleConnected = Boolean(getWorkspaceAccessToken());
+
   return (
     <div className="min-h-screen bg-[#F6F5F0] text-[#161618] flex flex-col">
       <TopBar
         activeSection={activeSection}
         onOpenSidebar={() => setSidebarOpen(true)}
         onNavigateChat={() => setActiveSection('chat')}
+        onNavigateSettings={() => setActiveSection('settings')}
+        onOpenTutorial={() => setTutorialOpen(true)}
         notifications={state.notifications}
         notificationsOpen={notificationsOpen}
         onToggleNotifications={() => setNotificationsOpen((o) => !o)}
@@ -889,11 +1069,12 @@ export default function App() {
         }}
         preferences={state.preferences}
         onToggleBrowserNotifications={handleToggleBrowserNotifications}
-        googleUser={googleUser}
+        currentUser={currentUser}
+        isGoogleConnected={isGoogleConnected}
         isSyncingGoogle={isSyncingGoogle}
         onGoogleSignIn={handleGoogleSignIn}
         onGoogleSync={syncGoogleWorkspaceData}
-        onGoogleSignOut={handleGoogleSignOut}
+        onSignOut={handleSignOut}
       />
 
       <SidebarMenu
@@ -901,6 +1082,7 @@ export default function App() {
         onClose={() => setSidebarOpen(false)}
         activeSection={activeSection}
         onSelectSection={setActiveSection}
+        onOpenTutorial={() => setTutorialOpen(true)}
         counts={sidebarCounts}
       />
 
@@ -925,7 +1107,7 @@ export default function App() {
         {activeSection === 'agenda' && (
           <AgendaView
             events={state.events}
-            isGoogleConnected={Boolean(googleUser)}
+            isGoogleConnected={isGoogleConnected}
             isSyncingGoogle={isSyncingGoogle}
             onSyncGoogleCalendar={syncGoogleWorkspaceData}
             onRequestCreateEvent={requestCreateEventWithModal}
@@ -967,7 +1149,7 @@ export default function App() {
         {activeSection === 'emails' && (
           <EmailsView
             emails={state.emails}
-            isGoogleConnected={Boolean(googleUser)}
+            isGoogleConnected={isGoogleConnected}
             isSyncingGmail={isSyncingGoogle}
             isTriagingAi={isTriagingAi}
             triageError={triageError}
@@ -998,7 +1180,68 @@ export default function App() {
             }}
           />
         )}
+
+        {activeSection === 'settings' && (
+          <SettingsAndInstallView
+            user={currentUser}
+            state={state}
+            isGoogleConnected={isGoogleConnected}
+            isSyncingGoogle={isSyncingGoogle}
+            onGoogleSignIn={handleGoogleSignIn}
+            onGoogleSync={syncGoogleWorkspaceData}
+            onUpdatePreferences={handleUpdatePreferences}
+            onImportState={(imported) => {
+              setState({
+                ...imported,
+                onboardingCompleted: true,
+              });
+            }}
+            onResetAllData={handleResetAllData}
+            onOpenTutorial={() => setTutorialOpen(true)}
+            showToast={showToast}
+          />
+        )}
       </main>
+
+      <OnboardingTutorialModal
+        open={tutorialOpen}
+        user={currentUser}
+        preferences={state.preferences}
+        onUpdatePreferences={handleUpdatePreferences}
+        onPickLocalSaveFile={async () => {
+          const name = await pickLocalSaveFile(state);
+          if (name) {
+            showToast(`Arquivo conectado: ${name}`);
+          }
+        }}
+        onCreateFirstTask={(title) => {
+          handleCreateTask({
+            title,
+            description: 'Primeira tarefa criada no tutorial inicial',
+            status: 'todo',
+            priority: 'high',
+            dueDate: formatDateKey(new Date()),
+            category: 'Foco',
+            color: 'indigo',
+            source: 'manual',
+          });
+        }}
+        onCreateFirstHabit={(name, goal, unit) => {
+          handleCreateHabit({
+            name,
+            dailyGoal: goal,
+            unit,
+            weeklyGoalDays: 5,
+            color: 'sky',
+            icon: 'Droplets',
+          });
+        }}
+        onComplete={() => {
+          setTutorialOpen(false);
+          setState((prev) => ({ ...prev, onboardingCompleted: true }));
+          showToast('Tutorial concluído! Seu espaço está pronto.');
+        }}
+      />
 
       {modalConfirm && (
         <ConfirmationModal

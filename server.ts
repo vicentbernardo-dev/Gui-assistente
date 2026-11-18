@@ -1,21 +1,236 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { FunctionDeclaration, GoogleGenAI, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.resolve(__dirname, '.data');
+const DB_FILE = path.join(DATA_DIR, 'gui-database.sqlite');
 const STATE_FILE = path.join(DATA_DIR, 'workspace-state.json');
 
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+}
+
+ensureDataDir();
+const sqliteDb = new DatabaseSync(DB_FILE);
+
+// Initialize relational & document SQLite tables
+sqliteDb.exec(`
+  PRAGMA journal_mode = WAL;
+
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT,
+    photo_url TEXT,
+    auth_provider TEXT NOT NULL DEFAULT 'local',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS workspaces (
+    user_id TEXT PRIMARY KEY,
+    state_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL,
+    priority TEXT NOT NULL,
+    due_date TEXT NOT NULL,
+    due_time TEXT,
+    category TEXT,
+    color TEXT,
+    created_at TEXT,
+    completed_at TEXT,
+    source TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT,
+    date TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    location TEXT,
+    color TEXT,
+    source TEXT,
+    google_event_id TEXT,
+    meet_link TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS habits (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    daily_goal INTEGER NOT NULL,
+    weekly_goal_days INTEGER NOT NULL,
+    color TEXT,
+    icon TEXT,
+    logs_json TEXT,
+    created_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`);
+
+function getSetting(key: string): string | null {
+  try {
+    const stmt = sqliteDb.prepare('SELECT value FROM app_settings WHERE key = ?');
+    const row = stmt.get(key) as { value?: string } | undefined;
+    return row?.value ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function setSetting(key: string, value: string) {
+  const stmt = sqliteDb.prepare(`
+    INSERT INTO app_settings (key, value, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `);
+  stmt.run(key, value, new Date().toISOString());
+}
+
+function hashPassword(password: string, salt?: string): string {
+  const usedSalt = salt || crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, usedSalt, 64).toString('hex');
+  return `${usedSalt}:${derived}`;
+}
+
+function verifyPassword(password: string, storedHash: string): boolean {
+  const [salt, key] = storedHash.split(':');
+  if (!salt || !key) return false;
+  const check = hashPassword(password, salt);
+  return crypto.timingSafeEqual(Buffer.from(check), Buffer.from(storedHash));
+}
+
+function syncNormalizedTables(userId: string, state: any) {
+  try {
+    sqliteDb.exec('BEGIN TRANSACTION');
+
+    // Sync tasks
+    sqliteDb.prepare('DELETE FROM tasks WHERE user_id = ?').run(userId);
+    const insertTask = sqliteDb.prepare(`
+      INSERT OR REPLACE INTO tasks (
+        id, user_id, title, description, status, priority, due_date, due_time, category, color, created_at, completed_at, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const t of Array.isArray(state.tasks) ? state.tasks : []) {
+      insertTask.run(
+        String(t.id),
+        userId,
+        String(t.title || ''),
+        String(t.description || ''),
+        String(t.status || 'todo'),
+        String(t.priority || 'medium'),
+        String(t.dueDate || ''),
+        t.dueTime ? String(t.dueTime) : null,
+        String(t.category || 'Geral'),
+        String(t.color || 'indigo'),
+        String(t.createdAt || ''),
+        t.completedAt ? String(t.completedAt) : null,
+        String(t.source || 'manual')
+      );
+    }
+
+    // Sync events
+    sqliteDb.prepare('DELETE FROM events WHERE user_id = ?').run(userId);
+    const insertEvent = sqliteDb.prepare(`
+      INSERT OR REPLACE INTO events (
+        id, user_id, title, description, date, start_time, end_time, location, color, source, google_event_id, meet_link
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const e of Array.isArray(state.events) ? state.events : []) {
+      insertEvent.run(
+        String(e.id),
+        userId,
+        String(e.title || ''),
+        String(e.description || ''),
+        String(e.date || ''),
+        String(e.startTime || '09:00'),
+        String(e.endTime || '10:00'),
+        String(e.location || ''),
+        String(e.color || 'indigo'),
+        String(e.source || 'local'),
+        e.googleEventId ? String(e.googleEventId) : null,
+        e.meetLink ? String(e.meetLink) : null
+      );
+    }
+
+    // Sync habits
+    sqliteDb.prepare('DELETE FROM habits WHERE user_id = ?').run(userId);
+    const insertHabit = sqliteDb.prepare(`
+      INSERT OR REPLACE INTO habits (
+        id, user_id, name, unit, daily_goal, weekly_goal_days, color, icon, logs_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const h of Array.isArray(state.habits) ? state.habits : []) {
+      insertHabit.run(
+        String(h.id),
+        userId,
+        String(h.name || ''),
+        String(h.unit || 'vezes'),
+        Number(h.dailyGoal) || 1,
+        Number(h.weeklyGoalDays) || 5,
+        String(h.color || 'sky'),
+        String(h.icon || 'Target'),
+        JSON.stringify(h.logs || {}),
+        String(h.createdAt || '')
+      );
+    }
+
+    sqliteDb.exec('COMMIT');
+  } catch (err) {
+    try {
+      sqliteDb.exec('ROLLBACK');
+    } catch {
+      // Ignore rollback error
+    }
+    console.error('SQLite normalized sync error:', err);
+  }
+}
+
+function getEffectiveApiKey(): string | null {
+  const fromDb = getSetting('GEMINI_API_KEY');
+  if (fromDb && fromDb.trim() && fromDb !== 'MY_GEMINI_API_KEY') {
+    return fromDb.trim();
+  }
+  const fromEnv = process.env.GEMINI_API_KEY;
+  if (fromEnv && fromEnv.trim() && fromEnv !== 'MY_GEMINI_API_KEY') {
+    return fromEnv.trim();
+  }
+  return null;
+}
+
 function getAiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+  const apiKey = getEffectiveApiKey();
+  if (!apiKey) {
     return null;
   }
   return new GoogleGenAI({
@@ -26,6 +241,35 @@ function getAiClient(): GoogleGenAI | null {
       },
     },
   });
+}
+
+async function generateContentWithModelFallback(ai: GoogleGenAI, params: { contents: any; config?: any }) {
+  const candidateModels = [
+    process.env.GEMINI_MODEL,
+    'gemini-4-hydrogen',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+  ].filter((m): m is string => Boolean(m));
+
+  let lastError: any = null;
+  for (const modelName of candidateModels) {
+    try {
+      return await ai.models.generateContent({
+        model: modelName,
+        contents: params.contents,
+        config: params.config,
+      });
+    } catch (err: any) {
+      lastError = err;
+      const msg = String(err?.message || '').toLowerCase();
+      // If model not found or unsupported, try next fallback model
+      if (msg.includes('not found') || msg.includes('404') || msg.includes('model') || msg.includes('invalid')) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 const guiToolDeclarations: FunctionDeclaration[] = [
@@ -104,30 +348,195 @@ const guiToolDeclarations: FunctionDeclaration[] = [
   },
 ];
 
-function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-}
-
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '5mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, service: 'gui-produtividade' });
+    res.json({
+      ok: true,
+      service: 'gui-produtividade',
+      database: 'sqlite',
+      hasGeminiKey: Boolean(getEffectiveApiKey()),
+    });
   });
 
-  app.get('/api/state', (_req, res) => {
+  // Database & Integration Status Endpoint
+  app.get('/api/db/status', (req, res) => {
     try {
-      if (!fs.existsSync(STATE_FILE)) {
-        res.json({ state: null });
+      const userId = String(req.query.userId || 'default');
+      const taskCount = (sqliteDb.prepare('SELECT COUNT(*) as c FROM tasks WHERE user_id = ?').get(userId) as any)?.c ?? 0;
+      const eventCount = (sqliteDb.prepare('SELECT COUNT(*) as c FROM events WHERE user_id = ?').get(userId) as any)?.c ?? 0;
+      const habitCount = (sqliteDb.prepare('SELECT COUNT(*) as c FROM habits WHERE user_id = ?').get(userId) as any)?.c ?? 0;
+      const userCount = (sqliteDb.prepare('SELECT COUNT(*) as c FROM users').get() as any)?.c ?? 0;
+      const dbSizeBytes = fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).size : 0;
+
+      res.json({
+        ok: true,
+        sqlitePath: DB_FILE,
+        dbSizeBytes,
+        hasGeminiKey: Boolean(getEffectiveApiKey()),
+        counts: {
+          tasks: taskCount,
+          events: eventCount,
+          habits: habitCount,
+          users: userCount,
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao consultar status do banco de dados.' });
+    }
+  });
+
+  // Save Gemini API Key from UI into SQLite & .env
+  app.post('/api/settings/api-key', (req, res) => {
+    try {
+      const { apiKey } = req.body ?? {};
+      if (!apiKey || typeof apiKey !== 'string' || !apiKey.trim()) {
+        res.status(400).json({ error: 'Informe uma chave GEMINI_API_KEY válida.' });
         return;
       }
-      const raw = fs.readFileSync(STATE_FILE, 'utf-8');
-      res.json({ state: JSON.parse(raw) });
+      const trimmed = apiKey.trim();
+      setSetting('GEMINI_API_KEY', trimmed);
+      process.env.GEMINI_API_KEY = trimmed;
+
+      // Also persist to local .env if writable
+      try {
+        const envPath = path.resolve(__dirname, '.env');
+        let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
+        if (envContent.includes('GEMINI_API_KEY=')) {
+          envContent = envContent.replace(/GEMINI_API_KEY=.*/g, `GEMINI_API_KEY="${trimmed}"`);
+        } else {
+          envContent += `\nGEMINI_API_KEY="${trimmed}"\n`;
+        }
+        fs.writeFileSync(envPath, envContent.trim() + '\n', 'utf-8');
+      } catch {
+        // Ignore if read-only filesystem
+      }
+
+      res.json({ ok: true, hasGeminiKey: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao salvar chave de API.' });
+    }
+  });
+
+  // Auth Endpoints (SQLite backed)
+  app.post('/api/auth/register', (req, res) => {
+    try {
+      const { name, email, password } = req.body ?? {};
+      if (!email || !password || String(password).length < 4) {
+        res.status(400).json({ error: 'Informe nome, e-mail e uma senha de pelo menos 4 caracteres.' });
+        return;
+      }
+      const cleanEmail = String(email).trim().toLowerCase();
+      const existing = sqliteDb.prepare('SELECT id FROM users WHERE email = ?').get(cleanEmail);
+      if (existing) {
+        res.status(409).json({ error: 'Este e-mail já está cadastrado. Faça login.' });
+        return;
+      }
+
+      const id = `usr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const now = new Date().toISOString();
+      const passwordHash = hashPassword(String(password));
+      const userName = String(name || cleanEmail.split('@')[0]).trim();
+
+      sqliteDb
+        .prepare(
+          `INSERT INTO users (id, name, email, password_hash, auth_provider, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'email', ?, ?)`
+        )
+        .run(id, userName, cleanEmail, passwordHash, now, now);
+
+      res.json({
+        ok: true,
+        user: {
+          id,
+          name: userName,
+          email: cleanEmail,
+          authProvider: 'email',
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao criar conta no banco de dados.' });
+    }
+  });
+
+  app.post('/api/auth/login', (req, res) => {
+    try {
+      const { email, password } = req.body ?? {};
+      const cleanEmail = String(email || '').trim().toLowerCase();
+      const row = sqliteDb
+        .prepare('SELECT id, name, email, password_hash, photo_url, auth_provider FROM users WHERE email = ?')
+        .get(cleanEmail) as any;
+
+      if (!row || !row.password_hash || !verifyPassword(String(password || ''), row.password_hash)) {
+        res.status(401).json({ error: 'E-mail ou senha incorretos.' });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        user: {
+          id: row.id,
+          name: row.name,
+          email: row.email,
+          photoURL: row.photo_url || undefined,
+          authProvider: row.auth_provider || 'email',
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao realizar login.' });
+    }
+  });
+
+  app.post('/api/auth/local-profile', (req, res) => {
+    try {
+      const { user } = req.body ?? {};
+      if (!user || !user.id || !user.email) {
+        res.status(400).json({ error: 'Perfil inválido.' });
+        return;
+      }
+      const now = new Date().toISOString();
+      sqliteDb
+        .prepare(
+          `INSERT INTO users (id, name, email, photo_url, auth_provider, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(email) DO UPDATE SET
+             name = excluded.name,
+             photo_url = excluded.photo_url,
+             updated_at = excluded.updated_at`
+        )
+        .run(
+          String(user.id),
+          String(user.name || 'Usuário'),
+          String(user.email).toLowerCase(),
+          user.photoURL ? String(user.photoURL) : null,
+          String(user.authProvider || 'local'),
+          now,
+          now
+        );
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao registrar perfil.' });
+    }
+  });
+
+  // Workspace State Persistence (SQLite + JSON file + Custom PC Path)
+  app.get('/api/state', (req, res) => {
+    try {
+      const userId = String(req.query.userId || 'default');
+      const row = sqliteDb
+        .prepare('SELECT state_json FROM workspaces WHERE user_id = ?')
+        .get(userId) as { state_json?: string } | undefined;
+
+      if (row?.state_json) {
+        res.json({ state: JSON.parse(row.state_json) });
+        return;
+      }
+
+      res.json({ state: null });
     } catch (err) {
-      console.error('Failed to read workspace state:', err);
+      console.error('Failed to read workspace state from SQLite:', err);
       res.json({ state: null });
     }
   });
@@ -135,17 +544,104 @@ async function startServer() {
   app.put('/api/state', (req, res) => {
     try {
       ensureDataDir();
-      const { state } = req.body;
+      const { state, userId = 'default' } = req.body ?? {};
       if (!state || typeof state !== 'object') {
         res.status(400).json({ error: 'Estado inválido.' });
         return;
       }
-      fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf-8');
-      res.json({ ok: true });
+
+      const now = new Date().toISOString();
+      const serialized = JSON.stringify(state, null, 2);
+
+      sqliteDb
+        .prepare(
+          `INSERT INTO workspaces (user_id, state_json, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET
+             state_json = excluded.state_json,
+             updated_at = excluded.updated_at`
+        )
+        .run(String(userId), serialized, now);
+
+      syncNormalizedTables(String(userId), state);
+
+      // Keep workspace-state.json updated as well
+      fs.writeFileSync(STATE_FILE, serialized, 'utf-8');
+
+      // If user configured a custom backup path on their PC, mirror the database JSON there
+      const customPath = state?.preferences?.customBackupPath;
+      let savedCustomPath: string | null = null;
+      if (customPath && typeof customPath === 'string' && customPath.trim()) {
+        try {
+          const resolvedCustom = path.resolve(customPath.trim());
+          const targetFile = resolvedCustom.endsWith('.json')
+            ? resolvedCustom
+            : path.join(resolvedCustom, `gui-database-${String(userId)}.json`);
+          const targetDir = path.dirname(targetFile);
+          if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+          }
+          fs.writeFileSync(targetFile, serialized, 'utf-8');
+          savedCustomPath = targetFile;
+        } catch (customErr) {
+          console.warn('Could not write to customBackupPath:', customErr);
+        }
+      }
+
+      res.json({ ok: true, updatedAt: now, savedCustomPath });
     } catch (err) {
       console.error('Failed to persist workspace state:', err);
-      res.status(500).json({ error: 'Não foi possível salvar os dados no servidor.' });
+      res.status(500).json({ error: 'Não foi possível salvar os dados no banco de dados.' });
     }
+  });
+
+  // Reset / Clean all data for user to start from zero
+  app.delete('/api/state', (req, res) => {
+    try {
+      const userId = String(req.query.userId || 'default');
+      sqliteDb.prepare('DELETE FROM workspaces WHERE user_id = ?').run(userId);
+      sqliteDb.prepare('DELETE FROM tasks WHERE user_id = ?').run(userId);
+      sqliteDb.prepare('DELETE FROM events WHERE user_id = ?').run(userId);
+      sqliteDb.prepare('DELETE FROM habits WHERE user_id = ?').run(userId);
+      if (fs.existsSync(STATE_FILE)) {
+        fs.unlinkSync(STATE_FILE);
+      }
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao limpar dados do banco.' });
+    }
+  });
+
+  // Download full PC native copy bundle (.tar.gz)
+  app.get('/api/download-pc-bundle', (_req, res) => {
+    const archivePath = path.join('/tmp', `gui-assistente-pc-${Date.now()}.tar.gz`);
+    execFile(
+      'tar',
+      [
+        '-czf',
+        archivePath,
+        '--exclude=node_modules',
+        '--exclude=.git',
+        '--exclude=dist',
+        '--exclude=.data/*.sqlite*',
+        '-C',
+        __dirname,
+        '.',
+      ],
+      (err) => {
+        if (err || !fs.existsSync(archivePath)) {
+          res.status(500).json({ error: 'Não foi possível gerar o pacote de download.' });
+          return;
+        }
+        res.download(archivePath, 'Gui-Assistente-PC-Nativo.tar.gz', () => {
+          try {
+            fs.unlinkSync(archivePath);
+          } catch {
+            // Ignore cleanup error
+          }
+        });
+      }
+    );
   });
 
   app.post('/api/chat', async (req, res) => {
@@ -160,7 +656,7 @@ async function startServer() {
       if (!ai) {
         res.status(503).json({
           error:
-            'Chave GEMINI_API_KEY não configurada no servidor. Verifique o painel Settings > Secrets para ativar o Gui com Gemini Flash.',
+            'Chave GEMINI_API_KEY não configurada. Abra "Configurações & Integrações" no menu para inserir sua chave do Google AI Studio.',
         });
         return;
       }
@@ -224,8 +720,7 @@ CONTEXTO ATUAL DO USUÁRIO:
         actionBadges: [],
       };
 
-      let response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+      let response = await generateContentWithModelFallback(ai, {
         contents,
         config: {
           systemInstruction,
@@ -364,8 +859,7 @@ CONTEXTO ATUAL DO USUÁRIO:
         contents.push(previousContent);
         contents.push({ role: 'user', parts: functionResponses });
 
-        response = await ai.models.generateContent({
-          model: 'gemini-4-hydrogen',
+        response = await generateContentWithModelFallback(ai, {
           contents,
           config: {
             systemInstruction,
@@ -415,8 +909,7 @@ CONTEXTO ATUAL DO USUÁRIO:
         receivedAt: e.receivedAt,
       }));
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+      const response = await generateContentWithModelFallback(ai, {
         contents: `Classifique os e-mails abaixo em português quanto à urgência:
 - "urgent": prazos de hoje, aprovações críticas, faturas vencendo, bloqueios ou solicitações diretas urgentes.
 - "today": alinhamentos, reuniões ou entregas importantes que podem esperar algumas horas hoje.
@@ -466,7 +959,7 @@ E-mails: ${JSON.stringify(compactEmails)}`,
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Gui Produtividade server running at http://localhost:${PORT}`);
+    console.log(`Gui Produtividade server & SQLite DB running at http://localhost:${PORT}`);
   });
 }
 

@@ -1,8 +1,16 @@
-export type AppSection = 'chat' | 'agenda' | 'kanban' | 'habits' | 'history' | 'emails';
+export type AppSection = 'chat' | 'agenda' | 'kanban' | 'habits' | 'history' | 'emails' | 'settings';
 
 export type TaskStatus = 'todo' | 'in_progress' | 'done';
 export type TaskPriority = 'high' | 'medium' | 'low';
 export type CardColorTheme = 'indigo' | 'yellow' | 'lime' | 'lavender' | 'coral' | 'sky' | 'pink';
+
+export interface UserProfile {
+  id: string;
+  name: string;
+  email: string;
+  photoURL?: string;
+  authProvider: 'google' | 'email' | 'local';
+}
 
 export interface TaskItem {
   id: string;
@@ -118,7 +126,7 @@ export interface SmartNotification {
   title: string;
   body: string;
   time: string;
-  type: 'event_soon' | 'routine_0900' | 'routine_1740' | 'routine_sunday' | 'urgent_email';
+  type: 'event_soon' | 'routine_0900' | 'routine_1740' | 'routine_sunday' | 'urgent_email' | 'system';
   read: boolean;
   createdAt: string;
 }
@@ -129,6 +137,9 @@ export interface RoutinePreferences {
   sundaySummaryEnabled: boolean;
   smartRemindersMinutesBefore: number; // default 15
   browserNotificationsEnabled: boolean;
+  soundNotificationsEnabled?: boolean;
+  storageMode?: 'hybrid' | 'cloud' | 'local';
+  customBackupPath?: string;
 }
 
 export interface WorkspaceState {
@@ -141,4 +152,6 @@ export interface WorkspaceState {
   notifications: SmartNotification[];
   preferences: RoutinePreferences;
   lastRoutineRun: Record<string, string>; // key e.g. "morning_2026-11-18"
+  onboardingCompleted?: boolean;
+  updatedAt?: string;
 }

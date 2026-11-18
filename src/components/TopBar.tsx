@@ -1,5 +1,5 @@
-import { Bell, LogOut, Menu, RefreshCw } from 'lucide-react';
-import { AppSection, RoutinePreferences, SmartNotification } from '../types';
+import { Bell, BookOpen, Database, Download, LogOut, Menu, RefreshCw } from 'lucide-react';
+import { AppSection, RoutinePreferences, SmartNotification, UserProfile } from '../types';
 import { NotificationsPopover } from './NotificationsPopover';
 
 const SECTION_TITLES: Record<AppSection, string> = {
@@ -9,12 +9,15 @@ const SECTION_TITLES: Record<AppSection, string> = {
   habits: 'Hábitos & Metas',
   history: 'Histórico da Semana',
   emails: 'E-mails Prioritários',
+  settings: 'Banco de Dados, Integrações & App',
 };
 
 interface TopBarProps {
   activeSection: AppSection;
   onOpenSidebar: () => void;
   onNavigateChat: () => void;
+  onNavigateSettings: () => void;
+  onOpenTutorial: () => void;
   notifications: SmartNotification[];
   notificationsOpen: boolean;
   onToggleNotifications: () => void;
@@ -23,17 +26,20 @@ interface TopBarProps {
   onTriggerRoutine: (mode: 'morning_0900' | 'evening_1740' | 'sunday_summary') => void;
   preferences: RoutinePreferences;
   onToggleBrowserNotifications: () => void;
-  googleUser: { name: string; email: string; photoURL?: string } | null;
+  currentUser: UserProfile;
+  isGoogleConnected: boolean;
   isSyncingGoogle: boolean;
   onGoogleSignIn: () => void;
   onGoogleSync: () => void;
-  onGoogleSignOut: () => void;
+  onSignOut: () => void;
 }
 
 export function TopBar({
   activeSection,
   onOpenSidebar,
   onNavigateChat,
+  onNavigateSettings,
+  onOpenTutorial,
   notifications,
   notificationsOpen,
   onToggleNotifications,
@@ -42,11 +48,12 @@ export function TopBar({
   onTriggerRoutine,
   preferences,
   onToggleBrowserNotifications,
-  googleUser,
+  currentUser,
+  isGoogleConnected,
   isSyncingGoogle,
   onGoogleSignIn,
   onGoogleSync,
-  onGoogleSignOut,
+  onSignOut,
 }: TopBarProps) {
   const unreadCount = notifications.filter((n) => !n.read).length;
 
@@ -88,8 +95,34 @@ export function TopBar({
           </span>
         </div>
 
-        {/* Right Zone: Smart Notifications + Google Workspace Auth */}
-        <div className="flex items-center gap-2 sm:gap-2.5 shrink-0 relative">
+        {/* Right Zone: Tutorial, Install/DB Hub, Smart Notifications + Auth */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 relative">
+          <button
+            type="button"
+            onClick={onOpenTutorial}
+            title="Ver Tutorial Inicial"
+            aria-label="Abrir tutorial inicial"
+            className="min-h-[40px] px-3 rounded-full bg-white border border-[#E5E2D9] text-[#161618] text-xs font-bold flex items-center gap-1.5 hover:bg-[#E2D5FF] transition-colors"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-[#5E4AE3]" />
+            <span className="hidden lg:inline">Tutorial</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onNavigateSettings}
+            title="Banco de Dados, Integrações e Baixar App"
+            aria-label="Abrir banco de dados e instalação do aplicativo"
+            className={`min-h-[40px] px-3 rounded-full text-xs font-bold flex items-center gap-1.5 transition-colors border ${
+              activeSection === 'settings'
+                ? 'bg-[#161618] text-white border-[#161618]'
+                : 'bg-white border-[#E5E2D9] text-[#161618] hover:bg-[#FBC74A]'
+            }`}
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Baixar App & Dados</span>
+          </button>
+
           <div className="relative">
             <button
               type="button"
@@ -116,46 +149,24 @@ export function TopBar({
             />
           </div>
 
-          {googleUser ? (
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={onGoogleSync}
-                disabled={isSyncingGoogle}
-                aria-label="Sincronizar Google Calendar e Gmail"
-                className="min-h-[40px] px-3.5 rounded-full bg-[#C4E46C] text-[#161618] text-xs font-bold flex items-center gap-1.5 hover:brightness-95 transition-all whitespace-nowrap shrink-0 disabled:opacity-60"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingGoogle ? 'animate-spin' : ''}`} />
-                <span className="hidden md:inline">Sincronizar Google</span>
-              </button>
-              <button
-                type="button"
-                onClick={onGoogleSignOut}
-                aria-label={`Sair da conta ${googleUser.email}`}
-                title={`Conectado: ${googleUser.email}`}
-                className="min-w-[40px] min-h-[40px] px-2.5 rounded-full bg-white border border-[#E5E2D9] flex items-center gap-2 text-xs font-semibold text-[#161618] hover:bg-[#FFE5E3] hover:text-[#D94F48] transition-colors shrink-0"
-              >
-                {googleUser.photoURL ? (
-                  <img
-                    src={googleUser.photoURL}
-                    alt={googleUser.name}
-                    referrerPolicy="no-referrer"
-                    className="w-6 h-6 rounded-full object-cover"
-                  />
-                ) : (
-                  <span className="w-6 h-6 rounded-full bg-[#5E4AE3] text-white text-[11px] font-bold flex items-center justify-center">
-                    {googleUser.name.slice(0, 1).toUpperCase()}
-                  </span>
-                )}
-                <LogOut className="w-3.5 h-3.5" />
-              </button>
-            </div>
+          {isGoogleConnected ? (
+            <button
+              type="button"
+              onClick={onGoogleSync}
+              disabled={isSyncingGoogle}
+              aria-label="Sincronizar Google Calendar e Gmail"
+              className="min-h-[40px] px-3 rounded-full bg-[#C4E46C] text-[#161618] text-xs font-bold flex items-center gap-1.5 hover:brightness-95 transition-all whitespace-nowrap shrink-0 disabled:opacity-60"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncingGoogle ? 'animate-spin' : ''}`} />
+              <span className="hidden xl:inline">Sync Google</span>
+            </button>
           ) : (
             <button
               type="button"
               onClick={onGoogleSignIn}
               className="gsi-material-button"
-              aria-label="Sign in with Google"
+              aria-label="Conectar Google"
+              title="Conectar Google Calendar, Gmail e Drive"
             >
               <div className="gsi-material-button-content-wrapper">
                 <div className="gsi-material-button-icon">
@@ -181,13 +192,35 @@ export function TopBar({
                       fill="#34A853"
                       d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
                     />
-                    <path fill="none" d="M0 0h48v48H0z" />
                   </svg>
                 </div>
-                <span className="gsi-material-button-contents">Sign in with Google</span>
+                <span className="hidden md:inline gsi-material-button-contents">Google Sync</span>
               </div>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={onSignOut}
+            aria-label={`Sair da conta ${currentUser.email}`}
+            title={`Conta: ${currentUser.name} (${currentUser.email}) — Clique para trocar de conta`}
+            className="min-w-[40px] min-h-[40px] px-2.5 rounded-full bg-white border border-[#E5E2D9] flex items-center gap-2 text-xs font-semibold text-[#161618] hover:bg-[#FFE5E3] hover:text-[#D94F48] transition-colors shrink-0"
+          >
+            {currentUser.photoURL ? (
+              <img
+                src={currentUser.photoURL}
+                alt={currentUser.name}
+                referrerPolicy="no-referrer"
+                className="w-6 h-6 rounded-full object-cover"
+              />
+            ) : (
+              <span className="w-6 h-6 rounded-full bg-[#5E4AE3] text-white text-[11px] font-bold flex items-center justify-center">
+                {currentUser.name.slice(0, 1).toUpperCase()}
+              </span>
+            )}
+            <span className="hidden xl:inline max-w-[90px] truncate">{currentUser.name.split(' ')[0]}</span>
+            <LogOut className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
     </header>

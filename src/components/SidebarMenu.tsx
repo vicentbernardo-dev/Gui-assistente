@@ -1,7 +1,9 @@
 import {
   Activity,
   ArrowUpRight,
+  BookOpen,
   CalendarDays,
+  Database,
   History,
   KanbanSquare,
   Mail,
@@ -15,6 +17,7 @@ interface SidebarMenuProps {
   onClose: () => void;
   activeSection: AppSection;
   onSelectSection: (section: AppSection) => void;
+  onOpenTutorial: () => void;
   counts: {
     pendingTasks: number;
     todayEvents: number;
@@ -80,6 +83,14 @@ const NAV_ITEMS: Array<{
     activeBg: 'bg-[#D94F48]',
     activeText: 'text-white',
   },
+  {
+    id: 'settings',
+    label: 'Banco, App & Integrações',
+    subtitle: 'Salvar onde quiser & PC/Mobile',
+    icon: Database,
+    activeBg: 'bg-[#161618]',
+    activeText: 'text-white',
+  },
 ];
 
 export function SidebarMenu({
@@ -87,6 +98,7 @@ export function SidebarMenu({
   onClose,
   activeSection,
   onSelectSection,
+  onOpenTutorial,
   counts,
 }: SidebarMenuProps) {
   if (!open) return null;
@@ -106,7 +118,7 @@ export function SidebarMenu({
         onClick={onClose}
         aria-hidden="true"
       />
-      <aside className="relative z-10 w-[310px] max-w-[88vw] h-full bg-[#F6F5F0] border-r border-[#E5E2D9] shadow-2xl flex flex-col p-5 overflow-y-auto">
+      <aside className="relative z-10 w-[315px] max-w-[88vw] h-full bg-[#F6F5F0] border-r border-[#E5E2D9] shadow-2xl flex flex-col p-5 overflow-y-auto">
         <div className="flex items-center justify-between gap-3 pb-4 border-b border-[#E5E2D9]">
           <div className="flex items-center gap-3">
             <img
@@ -130,7 +142,7 @@ export function SidebarMenu({
           </button>
         </div>
 
-        <nav className="mt-5 space-y-2.5 flex-1" aria-label="Seções do aplicativo">
+        <nav className="mt-5 space-y-2 flex-1" aria-label="Seções do aplicativo">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const isActive = activeSection === item.id;
@@ -152,7 +164,7 @@ export function SidebarMenu({
                 <div className="flex items-center gap-3 min-w-0">
                   <span
                     className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
-                      isActive ? 'bg-[#161618] text-white' : 'bg-[#F6F5F0] text-[#161618]'
+                      isActive ? 'bg-black/20 text-white' : 'bg-[#F6F5F0] text-[#161618]'
                     }`}
                   >
                     <Icon className="w-4 h-4" />
@@ -181,12 +193,25 @@ export function SidebarMenu({
           })}
         </nav>
 
-        <div className="mt-5 rounded-[22px] bg-[#161618] text-white p-4">
-          <p className="text-xs font-semibold text-[#FBC74A]">Lembretes automáticos do Gui</p>
-          <p className="text-xs text-white/80 mt-1 leading-relaxed">
-            Check-in às <span className="font-mono tabular-nums font-bold text-white">09:00</span>, revisão às{' '}
-            <span className="font-mono tabular-nums font-bold text-white">17:40</span> e resumo aos domingos.
-          </p>
+        <div className="mt-4 space-y-2.5">
+          <button
+            type="button"
+            onClick={() => {
+              onClose();
+              onOpenTutorial();
+            }}
+            className="w-full min-h-[42px] px-4 rounded-2xl bg-[#E2D5FF] text-[#161618] text-xs font-bold flex items-center justify-center gap-2 hover:brightness-95 transition-all"
+          >
+            <BookOpen className="w-4 h-4" />
+            Rever Tutorial Inicial
+          </button>
+
+          <div className="rounded-[22px] bg-[#161618] text-white p-4">
+            <p className="text-xs font-semibold text-[#FBC74A]">Banco Híbrido Ativo</p>
+            <p className="text-xs text-white/80 mt-1 leading-relaxed">
+              Sincronizado com SQLite local, Nuvem Firestore e alertas automáticos.
+            </p>
+          </div>
         </div>
       </aside>
     </div>

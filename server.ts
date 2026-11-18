@@ -1151,17 +1151,54 @@ E-mails: ${JSON.stringify(compactEmails)}`,
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    const url = `http://localhost:${PORT}`;
-    console.log(`\n=============================================================`);
-    console.log(`  Gui Assistente & Banco SQLite ativos em: ${url}`);
-    console.log(`  Banco de dados salvo em: ${DB_FILE}`);
-    console.log(`=============================================================\n`);
-
-    if (process.argv.includes('--open') || process.env.OPEN_BROWSER === 'true') {
-      openNativeAppWindow(url);
+  // Free previous stuck instance on PORT if running on Windows with --open
+  if (process.platform === 'win32' && process.argv.includes('--open')) {
+    try {
+      const netstatOut = spawnSync('cmd.exe', ['/c', `netstat -aon | findstr :${PORT} | findstr LISTENING`], {
+        encoding: 'utf-8',
+      }).stdout;
+      if (netstatOut) {
+        const lines = netstatOut.split(/\r?\n/).filter(Boolean);
+        for (const line of lines) {
+          const parts = line.trim().split(/\s+/);
+          const pid = Number(parts[parts.length - 1]);
+          if (pid && pid > 4 && pid !== process.pid) {
+            spawnSync('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore' });
+          }
+        }
+      }
+    } catch {
+      // Ignore cleanup errors
     }
-  });
+  }
+
+  function listenWithFallback(portToTry: number) {
+    const srv = app.listen(portToTry, '0.0.0.0', () => {
+      const url = `http://localhost:${portToTry}`;
+      console.log(`\n=============================================================`);
+      console.log(`  Gui Assistente & Banco SQLite ativos em: ${url}`);
+      console.log(`  Banco de dados salvo em: ${DB_FILE}`);
+      console.log(`=============================================================\n`);
+
+      if (process.argv.includes('--open') || process.env.OPEN_BROWSER === 'true') {
+        openNativeAppWindow(url);
+      }
+    });
+
+    srv.on('error', (err: any) => {
+      if (err?.code === 'EADDRINUSE' && portToTry < PORT + 10) {
+        console.warn(`Porta ${portToTry} em uso, tentando porta ${portToTry + 1}...`);
+        listenWithFallback(portToTry + 1);
+      } else {
+        console.error('Erro ao iniciar servidor:', err);
+      }
+    });
+  }
+
+  listenWithFallback(PORT);
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Erro fatal ao iniciar o Gui Assistente:', err);
+});
+

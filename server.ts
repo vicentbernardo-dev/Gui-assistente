@@ -305,12 +305,37 @@ function openNativeAppWindow(url: string) {
   }
 }
 
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function computeCrc32(buf: Buffer): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    crc = CRC32_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
 function buildProjectZipBuffer(rootDir: string): Buffer {
   const excludedDirs = new Set(['node_modules', '.git', '.data', '.vite', 'coverage']);
   const files: Array<{ relPath: string; fullPath: string }> = [];
 
   function walk(currentDir: string, prefix: string) {
-    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
     for (const entry of entries) {
       if (excludedDirs.has(entry.name)) continue;
       if (
@@ -339,12 +364,19 @@ function buildProjectZipBuffer(rootDir: string): Buffer {
   const localParts: Buffer[] = [];
   const centralParts: Buffer[] = [];
   let localOffset = 0;
+  let addedEntries = 0;
 
   for (const file of files) {
-    const rawData = fs.readFileSync(file.fullPath);
+    let rawData: Buffer;
+    try {
+      rawData = fs.readFileSync(file.fullPath);
+    } catch {
+      continue;
+    }
     const nameBuf = Buffer.from(file.relPath, 'utf-8');
-    const crc = zlib.crc32(rawData) >>> 0;
+    const crc = computeCrc32(rawData);
     const compressed = zlib.deflateRawSync(rawData);
+    addedEntries++;
 
     // Local File Header (30 bytes)
     const localHeader = Buffer.alloc(30);
@@ -391,8 +423,8 @@ function buildProjectZipBuffer(rootDir: string): Buffer {
   eocd.writeUInt32LE(0x06054b50, 0); // EOCD signature
   eocd.writeUInt16LE(0, 4); // disk number
   eocd.writeUInt16LE(0, 6); // central dir start disk
-  eocd.writeUInt16LE(files.length, 8); // entries on this disk
-  eocd.writeUInt16LE(files.length, 10); // total entries
+  eocd.writeUInt16LE(addedEntries, 8); // entries on this disk
+  eocd.writeUInt16LE(addedEntries, 10); // total entries
   eocd.writeUInt32LE(centralDirBuffer.length, 12); // size of central dir
   eocd.writeUInt32LE(localOffset, 16); // offset of central dir
   eocd.writeUInt16LE(0, 20); // comment length
@@ -795,8 +827,8 @@ async function startServer() {
       res.setHeader('Content-Length', String(zipBuffer.length));
       res.send(zipBuffer);
     } catch (err: any) {
-      console.error('Error generating ZIP bundle:', err);
-      res.status(500).json({ error: 'Não foi possível gerar o pacote de download.' });
+      console.error('Error generating ZIP bundle, redirecting to GitHub archive:', err);
+      res.redirect('https://github.com/vicentbernardo-dev/Gui-assistente/archive/refs/heads/main.zip');
     }
   });
 

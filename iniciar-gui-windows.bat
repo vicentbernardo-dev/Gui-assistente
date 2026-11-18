@@ -14,6 +14,21 @@ if %errorlevel% neq 0 (
   exit /b 1
 )
 
+REM Encerra qualquer instancia antiga que tenha ficado presa na porta 3000
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr :3000 ^| findstr LISTENING') do (
+  echo Encerrando instancia anterior na porta 3000 (PID %%a)...
+  taskkill /F /PID %%a >nul 2>nul
+)
+
+REM Se foi clonado via git, atualiza automaticamente para a versao mais recente
+if exist ".git" (
+  where git >nul 2>nul
+  if %errorlevel% equ 0 (
+    echo Verificando atualizacoes do Gui Assistente...
+    git pull origin main >nul 2>nul
+  )
+)
+
 if not exist "node_modules" (
   echo [1/3] Instalando dependencias pela primeira vez...
   call npm install --legacy-peer-deps

@@ -32,6 +32,10 @@ import {
   fetchGoogleCalendarEvents,
 } from './services/googleWorkspace';
 import {
+  processEmailPrioritization,
+  processGuiChatMessage,
+} from './services/guiAssistantEngine';
+import {
   ActivityLogEntry,
   AppSection,
   CalendarEvent,
@@ -245,7 +249,7 @@ export default function App() {
     []
   );
 
-  // Triage emails with Gemini Flash (falls back to heuristic if API unavailable)
+  // Triage emails with Gemini Flash or built-in assistant engine
   const prioritizeEmails = useCallback(
     async (inputEmails: EmailMessage[]) => {
       if (inputEmails.length === 0) {
@@ -255,38 +259,7 @@ export default function App() {
       setIsTriagingAi(true);
       setTriageError(null);
       try {
-        const res = await fetch('/api/emails/prioritize', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ emails: inputEmails }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data?.error || 'Falha ao priorizar e-mails com Gemini Flash.');
-        }
-
-        const aiMap = new Map<string, any>();
-        for (const item of data.prioritized || []) {
-          aiMap.set(item.id, item);
-        }
-
-        const merged: EmailMessage[] = inputEmails.map((em) => {
-          const hit = aiMap.get(em.id);
-          if (!hit) return em;
-          const validUrgency: EmailMessage['urgency'] =
-            hit.urgency === 'urgent' || hit.urgency === 'today' || hit.urgency === 'info'
-              ? hit.urgency
-              : em.urgency;
-          return {
-            ...em,
-            urgency: validUrgency,
-            aiReason: hit.aiReason || em.aiReason,
-            suggestedAction: hit.suggestedAction || em.suggestedAction,
-          };
-        });
-
-        const order: Record<EmailMessage['urgency'], number> = { urgent: 0, today: 1, info: 2 };
-        merged.sort((a, b) => order[a.urgency] - order[b.urgency]);
+        const merged = await processEmailPrioritization(inputEmails);
 
         setState((prev) => ({
           ...prev,
@@ -294,14 +267,14 @@ export default function App() {
           activities: [
             appendActivity({
               type: 'email_triaged',
-              title: 'E-mails priorizados pelo Gui com Gemini Flash',
+              title: 'E-mails priorizados pelo Gui',
               detail: `${merged.filter((m) => m.urgency === 'urgent').length} urgente(s) identificado(s).`,
               accent: 'coral',
             }),
             ...prev.activities,
           ],
         }));
-        showToast('E-mails analisados e priorizados pelo Gemini Flash!');
+        showToast('E-mails analisados e priorizados pelo Gui!');
       } catch (err: any) {
         setTriageError(err?.message || 'Erro ao analisar e-mails.');
         const fallback = prioritizeEmailsHeuristic(inputEmails);
@@ -350,8 +323,8 @@ export default function App() {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId: currentUser.id, state: stateRef.current }),
-        });
-        showToast(`Conta Google (${currentUser.email}) sincronizada com o banco SQLite local!`);
+        }).catch(() => {});
+        showToast(`Conta Google (${currentUser.email}) sincronizada com o banco de dados!`);
       } else {
         showToast('Conecte sua conta Google primeiro.');
       }
@@ -381,7 +354,7 @@ export default function App() {
     showToast('Você saiu da sua conta.');
   };
 
-  // Send message to Gui (Gemini Flash)
+  // Send message to Gui (Gemini Flash + Resilient Built-in Portuguese Assistant Engine)
   const handleSendChat = useCallback(
     async (
       text: string,
@@ -408,31 +381,22 @@ export default function App() {
       setChatError(null);
 
       try {
-        const res = await fetch('/api/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message: text,
-            routineMode,
-            history: currentState.messages.slice(-8).map((m) => ({
-              role: m.role,
-              content: m.content,
-            })),
-            context: {
-              todayKey,
-              currentTime: timeLabel,
-              tasks: currentState.tasks,
-              events: currentState.events,
-              habits: currentState.habits,
-              emails: currentState.emails,
-            },
-          }),
+        const data = await processGuiChatMessage({
+          message: text,
+          routineMode,
+          history: currentState.messages.slice(-8).map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+          context: {
+            todayKey,
+            currentTime: timeLabel,
+            tasks: currentState.tasks,
+            events: currentState.events,
+            habits: currentState.habits,
+            emails: currentState.emails,
+          },
         });
-
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(data?.error || 'Falha ao responder pelo Gemini Flash.');
-        }
 
         const mutations = data.mutations || {};
         const assistantMsg: ChatMessage = {

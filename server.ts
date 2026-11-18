@@ -299,11 +299,6 @@ function getAiClient(): GoogleGenAI | null {
   }
   return new GoogleGenAI({
     apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
   });
 }
 

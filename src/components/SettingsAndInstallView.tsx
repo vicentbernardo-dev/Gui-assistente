@@ -29,6 +29,10 @@ import {
   saveWorkspaceToGoogleDrive,
 } from '../services/cloudDatabase';
 import {
+  getSavedGeminiApiKey,
+  saveGeminiApiKey,
+} from '../services/guiAssistantEngine';
+import {
   dispatchSystemNotification,
   subscribePwaInstallPrompt,
   triggerPwaInstallPrompt,
@@ -80,15 +84,31 @@ export function SettingsAndInstallView({
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const buildLocalBrowserDbStatus = () => ({
+    sqlitePath: 'Armazenamento Nativo do Dispositivo (IndexedDB / LocalStorage)',
+    dbSizeBytes: new Blob([JSON.stringify(state)]).size,
+    hasGeminiKey: Boolean(getSavedGeminiApiKey()),
+    counts: {
+      tasks: state.tasks.length,
+      events: state.events.length,
+      habits: state.habits.length,
+      users: 1,
+    },
+  });
+
   const fetchDbStatus = () => {
     fetch(`/api/db/status?userId=${encodeURIComponent(user.id)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.ok) {
           setDbStatus(data);
+        } else {
+          setDbStatus(buildLocalBrowserDbStatus());
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        setDbStatus(buildLocalBrowserDbStatus());
+      });
   };
 
   useEffect(() => {
@@ -101,16 +121,16 @@ export function SettingsAndInstallView({
     if (!apiKeyInput.trim()) return;
     setSavingApiKey(true);
     try {
-      const res = await fetch('/api/settings/api-key', {
+      const trimmed = apiKeyInput.trim();
+      saveGeminiApiKey(trimmed);
+      await fetch('/api/settings/api-key', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: apiKeyInput.trim() }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro ao salvar chave.');
+        body: JSON.stringify({ apiKey: trimmed }),
+      }).catch(() => null);
       setApiKeyInput('');
       fetchDbStatus();
-      showToast('Chave GEMINI_API_KEY salva no banco de dados e ativada!');
+      showToast('Chave GEMINI_API_KEY salva e ativada no seu aplicativo!');
     } catch (err: any) {
       showToast(err?.message || 'Erro ao salvar chave Gemini.');
     } finally {

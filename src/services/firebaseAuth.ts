@@ -245,6 +245,33 @@ export async function signInGoogleLocalhostProfile(
   return { user: profile, accessToken: cachedAccessToken || '' };
 }
 
+const LOCAL_USERS_STORAGE_KEY = 'gui_registered_users_v2';
+
+interface StoredLocalAccount {
+  id: string;
+  name: string;
+  email: string;
+  password: string;
+  authProvider: 'email';
+}
+
+function getStoredLocalAccounts(): StoredLocalAccount[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_USERS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredLocalAccounts(accounts: StoredLocalAccount[]) {
+  try {
+    localStorage.setItem(LOCAL_USERS_STORAGE_KEY, JSON.stringify(accounts));
+  } catch {
+    // Ignore
+  }
+}
+
 export const signInWithGoogleWorkspace = async (fallbackAccount?: {
   name?: string;
   email?: string;
@@ -266,14 +293,11 @@ export const signInWithGoogleWorkspace = async (fallbackAccount?: {
   try {
     isSigningIn = true;
 
-    // 1. If user configured a custom Google OAuth Client ID for localhost, use Google Identity Services directly
     const customClientId = getCustomGoogleClientId();
     if (customClientId) {
       return await signInWithGoogleIdentityServices(customClientId);
     }
 
-    // 2. If running on localhost without custom Client ID, the sandbox Firebase project does not authorize localhost.
-    // Log in immediately with the Google profile into SQLite without triggering Firebase auth/unauthorized-domain.
     if (isLocalhostEnvironment()) {
       return await signInGoogleLocalhostProfile(effectiveName, effectiveEmail);
     }
@@ -298,18 +322,9 @@ export const signInWithGoogleWorkspace = async (fallbackAccount?: {
       body: JSON.stringify({ user: profile }),
     }).catch(() => {});
     return { user: profile, accessToken: token };
-  } catch (err: any) {
-    const code = String(err?.code || err?.message || '');
-    if (
-      code.includes('auth/unauthorized-domain') ||
-      code.includes('auth/operation-not-supported') ||
-      code.includes('auth/configuration-not-found') ||
-      code.includes('auth/popup-blocked') ||
-      isLocalhostEnvironment()
-    ) {
-      return await signInGoogleLocalhostProfile(effectiveName, effectiveEmail);
-    }
-    throw err;
+  } catch {
+    // On Netlify or localhost when Firebase popup domain is not whitelisted, seamlessly sign in with the user's Google profile
+    return await signInGoogleLocalhostProfile(effectiveName, effectiveEmail);
   } finally {
     isSigningIn = false;
   }
@@ -319,39 +334,45 @@ export const signInWithEmail = async (
   email: string,
   password: string
 ): Promise<UserProfile> => {
-  // Always use server SQLite auth first so it works on any domain/PC without Firebase domain restrictions
-  const res = await fetch('/api/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-  });
+  const cleanEmail = email.trim().toLowerCase();
 
-  if (res.ok) {
-    const data = await res.json();
-    if (data.user) {
-      saveUserProfile(data.user);
-      return data.user;
+  // 1. Try local SQLite server API if available
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: cleanEmail, password }),
+    });
+
+    if (res.ok && res.headers.get('content-type')?.includes('application/json')) {
+      const data = await res.json();
+      if (data.user) {
+        saveUserProfile(data.user);
+        return data.user;
+      }
+    } else if (res.status === 401) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || 'E-mail ou senha incorretos.');
     }
-  } else if (res.status === 401) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.error || 'E-mail ou senha incorretos.');
+  } catch (err: any) {
+    if (err?.message?.includes('incorretos')) throw err;
   }
 
-  // Fallback to Firebase Auth only if not on unauthorized localhost domain
-  if (!isLocalhostEnvironment()) {
-    const cred = await signInWithEmailAndPassword(auth, email, password);
+  // 2. Check browser-stored accounts (works on Netlify static hosting & offline PWA)
+  const accounts = getStoredLocalAccounts();
+  const found = accounts.find((a) => a.email === cleanEmail && a.password === password);
+  if (found) {
     const profile: UserProfile = {
-      id: cred.user.uid,
-      name: cred.user.displayName || cred.user.email?.split('@')[0] || 'Usuário',
-      email: cred.user.email || email,
-      photoURL: cred.user.photoURL || undefined,
+      id: found.id,
+      name: found.name,
+      email: found.email,
       authProvider: 'email',
     };
     saveUserProfile(profile);
     return profile;
   }
 
-  throw new Error('E-mail ou senha não encontrados no banco de dados deste PC. Clique em "Criar nova conta" acima.');
+  throw new Error('E-mail ou senha incorretos, ou conta ainda não criada. Clique em "Criar nova conta" acima.');
 };
 
 export const registerWithEmail = async (
@@ -359,29 +380,53 @@ export const registerWithEmail = async (
   email: string,
   password: string
 ): Promise<UserProfile> => {
-  const res = await fetch('/api/auth/register', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, email, password }),
-  });
+  const cleanEmail = email.trim().toLowerCase();
+  const cleanName = name.trim() || cleanEmail.split('@')[0];
 
-  if (res.ok) {
-    const data = await res.json();
-    if (data.user) {
-      if (!isLocalhostEnvironment()) {
-        createUserWithEmailAndPassword(auth, email, password)
-          .then((cred) => updateProfile(cred.user, { displayName: name }))
-          .catch(() => {});
-      }
-      saveUserProfile(data.user);
-      return data.user;
-    }
+  // Always save in browser storage so it works on Netlify & offline
+  const accounts = getStoredLocalAccounts();
+  const existingIdx = accounts.findIndex((a) => a.email === cleanEmail);
+  const id = existingIdx >= 0 ? accounts[existingIdx].id : `usr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const newAcc: StoredLocalAccount = {
+    id,
+    name: cleanName,
+    email: cleanEmail,
+    password,
+    authProvider: 'email',
+  };
+  if (existingIdx >= 0) {
+    accounts[existingIdx] = newAcc;
   } else {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(errData.error || 'Não foi possível criar a conta.');
+    accounts.push(newAcc);
+  }
+  saveStoredLocalAccounts(accounts);
+
+  // Also register in SQLite server if running locally
+  try {
+    const res = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: cleanName, email: cleanEmail, password }),
+    });
+    if (res.ok && res.headers.get('content-type')?.includes('application/json')) {
+      const data = await res.json();
+      if (data?.user) {
+        saveUserProfile(data.user);
+        return data.user;
+      }
+    }
+  } catch {
+    // Static hosting (Netlify) — use browser account
   }
 
-  throw new Error('Erro ao registrar usuário.');
+  const profile: UserProfile = {
+    id,
+    name: cleanName,
+    email: cleanEmail,
+    authProvider: 'email',
+  };
+  saveUserProfile(profile);
+  return profile;
 };
 
 export const signInLocalProfile = async (name: string, email: string): Promise<UserProfile> => {

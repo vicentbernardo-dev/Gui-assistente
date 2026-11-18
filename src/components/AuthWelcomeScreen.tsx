@@ -157,10 +157,11 @@ export function AuthWelcomeScreen({ onAuthenticated }: AuthWelcomeScreenProps) {
           </button>
           <a
             href="/api/download-pc-bundle"
+            download="Gui-Assistente-PC-Nativo.zip"
             className="min-h-[40px] px-4 rounded-full bg-white border border-[#E5E2D9] text-[#161618] text-xs font-bold flex items-center gap-1.5 hover:bg-[#161618] hover:text-white transition-colors"
           >
             <Laptop className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Baixar para PC</span>
+            <span className="hidden sm:inline">Baixar para PC (.zip)</span>
           </a>
         </div>
       </header>

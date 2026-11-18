@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { FunctionDeclaration, GoogleGenAI, Type } from '@google/genai';
@@ -302,6 +303,101 @@ function openNativeAppWindow(url: string) {
   } else {
     exec(`xdg-open "${url}"`);
   }
+}
+
+function buildProjectZipBuffer(rootDir: string): Buffer {
+  const excludedDirs = new Set(['node_modules', '.git', '.data', '.vite', 'coverage']);
+  const files: Array<{ relPath: string; fullPath: string }> = [];
+
+  function walk(currentDir: string, prefix: string) {
+    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (excludedDirs.has(entry.name)) continue;
+      if (
+        entry.name.endsWith('.sqlite') ||
+        entry.name.endsWith('.sqlite-wal') ||
+        entry.name.endsWith('.sqlite-shm') ||
+        entry.name.endsWith('.zip') ||
+        entry.name.endsWith('.tar.gz')
+      ) {
+        continue;
+      }
+      if (entry.name === '.env') continue;
+
+      const fullPath = path.join(currentDir, entry.name);
+      const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(fullPath, relPath);
+      } else if (entry.isFile()) {
+        files.push({ relPath: `Gui-Assistente/${relPath}`, fullPath });
+      }
+    }
+  }
+
+  walk(rootDir, '');
+
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let localOffset = 0;
+
+  for (const file of files) {
+    const rawData = fs.readFileSync(file.fullPath);
+    const nameBuf = Buffer.from(file.relPath, 'utf-8');
+    const crc = zlib.crc32(rawData) >>> 0;
+    const compressed = zlib.deflateRawSync(rawData);
+
+    // Local File Header (30 bytes)
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0); // signature
+    localHeader.writeUInt16LE(20, 4); // version needed
+    localHeader.writeUInt16LE(0x0800, 6); // UTF-8 flag
+    localHeader.writeUInt16LE(8, 8); // compression method: deflate
+    localHeader.writeUInt16LE(0, 10); // mod time
+    localHeader.writeUInt16LE(0x5772, 12); // mod date
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(compressed.length, 18);
+    localHeader.writeUInt32LE(rawData.length, 22);
+    localHeader.writeUInt16LE(nameBuf.length, 26);
+    localHeader.writeUInt16LE(0, 28); // extra field length
+
+    localParts.push(localHeader, nameBuf, compressed);
+
+    // Central Directory Header (46 bytes)
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0); // signature
+    centralHeader.writeUInt16LE(20, 4); // version made by
+    centralHeader.writeUInt16LE(20, 6); // version needed
+    centralHeader.writeUInt16LE(0x0800, 8); // UTF-8 flag
+    centralHeader.writeUInt16LE(8, 10); // deflate
+    centralHeader.writeUInt16LE(0, 12); // mod time
+    centralHeader.writeUInt16LE(0x5772, 14); // mod date
+    centralHeader.writeUInt32LE(crc, 16);
+    centralHeader.writeUInt32LE(compressed.length, 20);
+    centralHeader.writeUInt32LE(rawData.length, 24);
+    centralHeader.writeUInt16LE(nameBuf.length, 28);
+    centralHeader.writeUInt16LE(0, 30); // extra length
+    centralHeader.writeUInt16LE(0, 32); // comment length
+    centralHeader.writeUInt16LE(0, 34); // disk number
+    centralHeader.writeUInt16LE(0, 36); // internal attrs
+    centralHeader.writeUInt32LE(0, 38); // external attrs
+    centralHeader.writeUInt32LE(localOffset, 42); // offset of local header
+
+    centralParts.push(centralHeader, nameBuf);
+    localOffset += localHeader.length + nameBuf.length + compressed.length;
+  }
+
+  const centralDirBuffer = Buffer.concat(centralParts);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); // EOCD signature
+  eocd.writeUInt16LE(0, 4); // disk number
+  eocd.writeUInt16LE(0, 6); // central dir start disk
+  eocd.writeUInt16LE(files.length, 8); // entries on this disk
+  eocd.writeUInt16LE(files.length, 10); // total entries
+  eocd.writeUInt32LE(centralDirBuffer.length, 12); // size of central dir
+  eocd.writeUInt32LE(localOffset, 16); // offset of central dir
+  eocd.writeUInt16LE(0, 20); // comment length
+
+  return Buffer.concat([...localParts, centralDirBuffer, eocd]);
 }
 
 const guiToolDeclarations: FunctionDeclaration[] = [
@@ -690,37 +786,18 @@ async function startServer() {
     }
   });
 
-  // Download full PC native copy bundle (.tar.gz)
+  // Download full PC native copy bundle (.zip generated in-memory via pure Node.js zlib)
   app.get('/api/download-pc-bundle', (_req, res) => {
-    const tmpDir = process.platform === 'win32' ? process.env.TEMP || DATA_DIR : '/tmp';
-    const archivePath = path.join(tmpDir, `gui-assistente-pc-${Date.now()}.tar.gz`);
-    execFile(
-      'tar',
-      [
-        '-czf',
-        archivePath,
-        '--exclude=node_modules',
-        '--exclude=.git',
-        '--exclude=dist',
-        '--exclude=.data/*.sqlite*',
-        '-C',
-        __dirname,
-        '.',
-      ],
-      (err) => {
-        if (err || !fs.existsSync(archivePath)) {
-          res.status(500).json({ error: 'Não foi possível gerar o pacote de download.' });
-          return;
-        }
-        res.download(archivePath, 'Gui-Assistente-PC-Nativo.tar.gz', () => {
-          try {
-            fs.unlinkSync(archivePath);
-          } catch {
-            // Ignore cleanup error
-          }
-        });
-      }
-    );
+    try {
+      const zipBuffer = buildProjectZipBuffer(__dirname);
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', 'attachment; filename="Gui-Assistente-PC-Nativo.zip"');
+      res.setHeader('Content-Length', String(zipBuffer.length));
+      res.send(zipBuffer);
+    } catch (err: any) {
+      console.error('Error generating ZIP bundle:', err);
+      res.status(500).json({ error: 'Não foi possível gerar o pacote de download.' });
+    }
   });
 
   app.post('/api/chat', async (req, res) => {

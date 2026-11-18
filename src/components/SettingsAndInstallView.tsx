@@ -300,10 +300,11 @@ export function SettingsAndInstallView({
 
             <a
               href="/api/download-pc-bundle"
+              download="Gui-Assistente-PC-Nativo.zip"
               className="min-h-[48px] px-5 py-3 rounded-2xl bg-white border border-[#161618]/20 text-[#161618] text-xs font-bold flex items-center justify-center gap-2.5 hover:bg-[#FBC74A] transition-colors shadow-xs"
             >
               <Download className="w-4 h-4" />
-              <span>Baixar Cópia Nativa para PC (.tar.gz)</span>
+              <span>Baixar Cópia Nativa para PC (.zip)</span>
             </a>
           </div>
 

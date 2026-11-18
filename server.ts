@@ -268,6 +268,18 @@ function syncNormalizedTables(userId: string, state: any) {
   }
 }
 
+const BUILTIN_GEMINI_API_KEY = 'AQ.Ab8RN6K12FqqNYZHQDpPL4LyfYMLxtfnuTCD3_vbDg8hRdODaQ';
+
+// Ensure built-in API key is persisted in SQLite settings if not already customized
+try {
+  const currentKey = getSetting('GEMINI_API_KEY');
+  if (!currentKey || currentKey === 'MY_GEMINI_API_KEY') {
+    setSetting('GEMINI_API_KEY', BUILTIN_GEMINI_API_KEY);
+  }
+} catch {
+  // Ignore
+}
+
 function getEffectiveApiKey(): string | null {
   const fromDb = getSetting('GEMINI_API_KEY');
   if (fromDb && fromDb.trim() && fromDb !== 'MY_GEMINI_API_KEY') {
@@ -277,7 +289,7 @@ function getEffectiveApiKey(): string | null {
   if (fromEnv && fromEnv.trim() && fromEnv !== 'MY_GEMINI_API_KEY') {
     return fromEnv.trim();
   }
-  return null;
+  return BUILTIN_GEMINI_API_KEY;
 }
 
 function getAiClient(): GoogleGenAI | null {
@@ -298,13 +310,23 @@ function getAiClient(): GoogleGenAI | null {
 async function generateContentWithModelFallback(ai: GoogleGenAI, params: { contents: any; config?: any }) {
   const candidateModels = [
     process.env.GEMINI_MODEL,
-    'gemini-4-hydrogen',
+    'gemini-3.8-flash',
+    'models/gemini-3.8-flash',
+    'gemini-3.8-pro',
+    'gemini-3.5-flash',
+    'gemini-3-flash-preview',
     'gemini-2.5-flash',
-    'gemini-2.0-flash',
   ].filter((m): m is string => Boolean(m));
 
   let lastError: any = null;
-  for (const modelName of candidateModels) {
+  const tried = new Set<string>();
+  const queue = [...candidateModels];
+
+  while (queue.length > 0) {
+    const modelName = queue.shift()!;
+    if (tried.has(modelName)) continue;
+    tried.add(modelName);
+
     try {
       return await ai.models.generateContent({
         model: modelName,
@@ -313,8 +335,22 @@ async function generateContentWithModelFallback(ai: GoogleGenAI, params: { conte
       });
     } catch (err: any) {
       lastError = err;
-      const msg = String(err?.message || '').toLowerCase();
-      if (msg.includes('not found') || msg.includes('404') || msg.includes('model') || msg.includes('invalid')) {
+      const rawMsg = String(err?.message || '');
+      // Automatically extract recommended model if API returns "Please update your code to use models/..."
+      const recommendedMatch = rawMsg.match(/models\/(gemini-[a-zA-Z0-9._-]+)/i);
+      if (recommendedMatch && recommendedMatch[1] && !tried.has(recommendedMatch[1])) {
+        queue.unshift(recommendedMatch[1]);
+        continue;
+      }
+
+      const msg = rawMsg.toLowerCase();
+      if (
+        msg.includes('not found') ||
+        msg.includes('404') ||
+        msg.includes('no longer available') ||
+        msg.includes('model') ||
+        msg.includes('invalid')
+      ) {
         continue;
       }
       throw err;

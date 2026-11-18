@@ -8,9 +8,15 @@ echo.
 if not exist "server.ts" goto erro_zip
 where node >nul 2>nul
 if errorlevel 1 goto erro_node
-if exist ".git" echo Atualizando para a versao mais recente do GitHub...
-if exist ".git" git fetch origin main >nul 2>nul
-if exist ".git" git reset --hard origin/main >nul 2>nul
+where git >nul 2>nul
+if errorlevel 1 goto pular_git
+echo Sincronizando atualizacoes automaticas do GitHub...
+if not exist ".git" git init >nul 2>nul
+git remote remove origin >nul 2>nul
+git remote add origin https://github.com/vicentbernardo-dev/Gui-assistente.git >nul 2>nul
+git fetch origin main >nul 2>nul
+git reset --hard origin/main >nul 2>nul
+:pular_git
 if not exist "node_modules" echo Instalando dependencias pela primeira vez...
 if not exist "node_modules" call npm install --legacy-peer-deps
 if exist "node_modules\esbuild\install.js" node "node_modules\esbuild\install.js"

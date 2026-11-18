@@ -24,10 +24,33 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    <script type="module" crossorigin src="/assets/index-DDCrHuFI.js"></script>
+    <script type="module" crossorigin src="/assets/index-DQslNCzB.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-9JfJQI5J.css">
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem('gui_sw_cache_purged_v5') !== '1') {
+            localStorage.setItem('gui_sw_cache_purged_v5', '1');
+            if ('caches' in window) {
+              caches.keys().then(function (keys) {
+                keys.forEach(function (k) {
+                  caches.delete(k);
+                });
+              });
+            }
+            if ('serviceWorker' in navigator) {
+              navigator.serviceWorker.getRegistrations().then(function (regs) {
+                regs.forEach(function (r) {
+                  r.update();
+                });
+              });
+            }
+          }
+        } catch (e) {}
+      })();
+    </script>
   </body>
 </html>

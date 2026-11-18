@@ -252,6 +252,17 @@ export const signInWithGoogleWorkspace = async (fallbackAccount?: {
   user: UserProfile;
   accessToken: string;
 }> => {
+  const effectiveEmail = fallbackAccount?.email?.trim() || 'minhaconta@gmail.com';
+  const effectiveName =
+    fallbackAccount?.name?.trim() ||
+    (fallbackAccount?.email?.trim()
+      ? fallbackAccount.email
+          .trim()
+          .split('@')[0]
+          .replace(/[._-]+/g, ' ')
+          .replace(/\b\w/g, (l) => l.toUpperCase())
+      : 'Minha Conta Google');
+
   try {
     isSigningIn = true;
 
@@ -262,12 +273,9 @@ export const signInWithGoogleWorkspace = async (fallbackAccount?: {
     }
 
     // 2. If running on localhost without custom Client ID, the sandbox Firebase project does not authorize localhost.
-    // Use seamless Google PC profile if email is provided, or try popup and gracefully fallback on auth/unauthorized-domain.
-    if (isLocalhostEnvironment() && fallbackAccount?.email?.trim()) {
-      return await signInGoogleLocalhostProfile(
-        fallbackAccount.name || '',
-        fallbackAccount.email
-      );
+    // Log in immediately with the Google profile into SQLite without triggering Firebase auth/unauthorized-domain.
+    if (isLocalhostEnvironment()) {
+      return await signInGoogleLocalhostProfile(effectiveName, effectiveEmail);
     }
 
     const result = await signInWithPopup(auth, provider);
@@ -295,19 +303,11 @@ export const signInWithGoogleWorkspace = async (fallbackAccount?: {
     if (
       code.includes('auth/unauthorized-domain') ||
       code.includes('auth/operation-not-supported') ||
-      code.includes('auth/configuration-not-found')
+      code.includes('auth/configuration-not-found') ||
+      code.includes('auth/popup-blocked') ||
+      isLocalhostEnvironment()
     ) {
-      if (fallbackAccount?.email?.trim()) {
-        return await signInGoogleLocalhostProfile(
-          fallbackAccount.name || '',
-          fallbackAccount.email
-        );
-      }
-      const friendlyErr: any = new Error(
-        'Para entrar com sua conta Google no PC local (localhost), informe seu nome e seu e-mail @gmail.com abaixo e clique em Entrar com Conta Google.'
-      );
-      friendlyErr.code = 'LOCALHOST_GOOGLE_EMAIL_REQUIRED';
-      throw friendlyErr;
+      return await signInGoogleLocalhostProfile(effectiveName, effectiveEmail);
     }
     throw err;
   } finally {

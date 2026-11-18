@@ -18,6 +18,45 @@ const DATA_DIR = path.resolve(__dirname, '.data');
 const DB_FILE = path.join(DATA_DIR, 'gui-database.sqlite');
 const STATE_FILE = path.join(DATA_DIR, 'workspace-state.json');
 
+// On Windows, free any previous zombie node process holding PORT (and SQLite lock) before opening DB
+if (process.platform === 'win32') {
+  try {
+    spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        `Get-NetTCPConnection -LocalPort ${PORT} -State Listen -ErrorAction SilentlyContinue | ForEach-Object { if ($_.OwningProcess -ne ${process.pid} -and $_.OwningProcess -gt 4) { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } }`,
+      ],
+      { stdio: 'ignore' }
+    );
+  } catch {
+    // Ignore
+  }
+  try {
+    const netstatOut = spawnSync('cmd.exe', ['/c', `netstat -aon | findstr :${PORT}`], {
+      encoding: 'utf-8',
+    }).stdout;
+    if (netstatOut) {
+      const lines = netstatOut.split(/\r?\n/).filter(Boolean);
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        // Language-independent check: TCP <local:3000> <foreign:0> <STATE> <PID>
+        if (parts.length >= 5 && parts[1]?.endsWith(`:${PORT}`) && parts[2]?.endsWith(':0')) {
+          const pid = Number(parts[parts.length - 1]);
+          if (pid && pid > 4 && pid !== process.pid) {
+            spawnSync('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore' });
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore
+  }
+}
+
 // Ensure esbuild binary is initialized if npm skipped postinstall scripts
 const esbuildInstallScript = path.resolve(__dirname, 'node_modules', 'esbuild', 'install.js');
 const esbuildMarker = path.resolve(__dirname, 'node_modules', 'esbuild', '.gui-postinstall-done');
@@ -1164,8 +1203,17 @@ E-mails: ${JSON.stringify(compactEmails)}`,
     (process.argv.includes('--open') && fs.existsSync(distIndex));
 
   if (useProdStatic && fs.existsSync(distIndex)) {
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        etag: false,
+        lastModified: false,
+        setHeaders: (res) => {
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        },
+      })
+    );
     app.use((_req, res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
       res.sendFile(distIndex);
     });
   } else {
@@ -1174,27 +1222,6 @@ E-mails: ${JSON.stringify(compactEmails)}`,
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  }
-
-  // Free previous stuck instance on PORT if running on Windows with --open
-  if (process.platform === 'win32' && process.argv.includes('--open')) {
-    try {
-      const netstatOut = spawnSync('cmd.exe', ['/c', `netstat -aon | findstr :${PORT} | findstr LISTENING`], {
-        encoding: 'utf-8',
-      }).stdout;
-      if (netstatOut) {
-        const lines = netstatOut.split(/\r?\n/).filter(Boolean);
-        for (const line of lines) {
-          const parts = line.trim().split(/\s+/);
-          const pid = Number(parts[parts.length - 1]);
-          if (pid && pid > 4 && pid !== process.pid) {
-            spawnSync('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore' });
-          }
-        }
-      }
-    } catch {
-      // Ignore cleanup errors
-    }
   }
 
   function listenWithFallback(portToTry: number) {

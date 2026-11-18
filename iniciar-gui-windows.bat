@@ -8,7 +8,9 @@ echo.
 if not exist "server.ts" goto erro_zip
 where node >nul 2>nul
 if errorlevel 1 goto erro_node
-if exist ".git" git pull origin main
+if exist ".git" echo Atualizando para a versao mais recente do GitHub...
+if exist ".git" git fetch origin main >nul 2>nul
+if exist ".git" git reset --hard origin/main >nul 2>nul
 if not exist "node_modules" echo Instalando dependencias pela primeira vez...
 if not exist "node_modules" call npm install --legacy-peer-deps
 if exist "node_modules\esbuild\install.js" node "node_modules\esbuild\install.js"

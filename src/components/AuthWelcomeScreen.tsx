@@ -42,11 +42,15 @@ export function AuthWelcomeScreen({ onAuthenticated }: AuthWelcomeScreenProps) {
     return subscribePwaInstallPrompt(setCanInstallPwa);
   }, []);
 
-  const handleGoogleLogin = async () => {
+  const handleGoogleLogin = async (e?: FormEvent) => {
+    if (e) e.preventDefault();
     setError(null);
     setLoading(true);
     try {
-      const { user } = await signInWithGoogleWorkspace();
+      const { user } = await signInWithGoogleWorkspace({
+        name: name.trim(),
+        email: email.trim(),
+      });
       await fetch('/api/auth/local-profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

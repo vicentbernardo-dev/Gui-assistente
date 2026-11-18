@@ -1,9 +1,10 @@
-const CACHE_NAME = 'gui-assistente-cache-v3';
+const CACHE_NAME = 'gui-assistente-cache-v4';
 const PRECACHE_ASSETS = [
-  '/manifest.webmanifest',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png',
-  '/icons/favicon.png',
+  '/manifest.webmanifest?v=4',
+  '/favicon.ico?v=4',
+  '/icons/icon-192.png?v=4',
+  '/icons/icon-512.png?v=4',
+  '/icons/favicon.png?v=4',
 ];
 
 self.addEventListener('install', (event) => {

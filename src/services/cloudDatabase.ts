@@ -92,12 +92,14 @@ export async function parseImportedWorkspaceJson(file: File): Promise<WorkspaceS
   return candidate as WorkspaceState;
 }
 
-// Firebase Firestore Cloud Sync
+// Firebase Firestore Cloud Sync (only called when an active Firestore project is configured)
+let firestoreCircuitOpen = firebaseApp.options.projectId === 'gen-lang-client-0148295561';
+
 export async function saveWorkspaceToFirestore(
   userId: string,
   state: WorkspaceState
 ): Promise<boolean> {
-  if (!userId || userId.startsWith('local-')) return false;
+  if (!userId || userId.startsWith('local-') || firestoreCircuitOpen) return false;
   try {
     const docRef = doc(db, 'gui_workspaces', userId);
     const cleanPayload = JSON.parse(
@@ -108,9 +110,8 @@ export async function saveWorkspaceToFirestore(
     );
     await setDoc(docRef, cleanPayload, { merge: true });
     return true;
-  } catch (err) {
-    // Firestore may be offline or rules restricted; server SQLite still persists everything
-    console.warn('Firestore sync warning:', err);
+  } catch {
+    firestoreCircuitOpen = true;
     return false;
   }
 }
@@ -118,7 +119,7 @@ export async function saveWorkspaceToFirestore(
 export async function loadWorkspaceFromFirestore(
   userId: string
 ): Promise<WorkspaceState | null> {
-  if (!userId || userId.startsWith('local-')) return null;
+  if (!userId || userId.startsWith('local-') || firestoreCircuitOpen) return null;
   try {
     const docRef = doc(db, 'gui_workspaces', userId);
     const snap = await getDoc(docRef);
@@ -128,8 +129,8 @@ export async function loadWorkspaceFromFirestore(
         return data;
       }
     }
-  } catch (err) {
-    console.warn('Firestore load warning:', err);
+  } catch {
+    firestoreCircuitOpen = true;
   }
   return null;
 }

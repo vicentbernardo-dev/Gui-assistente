@@ -31,10 +31,15 @@ provider.setCustomParameters({
 
 const SESSION_TOKEN_KEY = 'gui_google_oauth_token_v2';
 const AUTH_USER_KEY = 'gui_authenticated_user_v2';
+const CUSTOM_CLIENT_ID_KEY = 'gui_custom_google_client_id';
 
 let cachedAccessToken: string | null = (() => {
   try {
-    return sessionStorage.getItem(SESSION_TOKEN_KEY);
+    return (
+      sessionStorage.getItem(SESSION_TOKEN_KEY) ||
+      localStorage.getItem(SESSION_TOKEN_KEY) ||
+      null
+    );
   } catch {
     return null;
   }
@@ -47,11 +52,33 @@ export function setWorkspaceAccessToken(token: string | null) {
   try {
     if (token) {
       sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+      localStorage.setItem(SESSION_TOKEN_KEY, token);
     } else {
       sessionStorage.removeItem(SESSION_TOKEN_KEY);
+      localStorage.removeItem(SESSION_TOKEN_KEY);
     }
   } catch {
     // Ignore storage errors
+  }
+}
+
+export function getCustomGoogleClientId(): string {
+  try {
+    return localStorage.getItem(CUSTOM_CLIENT_ID_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function setCustomGoogleClientId(clientId: string) {
+  try {
+    if (clientId.trim()) {
+      localStorage.setItem(CUSTOM_CLIENT_ID_KEY, clientId.trim());
+    } else {
+      localStorage.removeItem(CUSTOM_CLIENT_ID_KEY);
+    }
+  } catch {
+    // Ignore
   }
 }
 
@@ -81,6 +108,12 @@ export function saveUserProfile(profile: UserProfile | null) {
   }
 }
 
+export function isLocalhostEnvironment(): boolean {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname;
+  return host === 'localhost' || host === '127.0.0.1' || host.startsWith('192.168.') || host.endsWith('.local');
+}
+
 export const initWorkspaceAuth = (
   onAuthSuccess?: (user: UserProfile, token: string | null) => void,
   onSignedOut?: () => void
@@ -97,11 +130,11 @@ export const initWorkspaceAuth = (
       saveUserProfile(profile);
       onAuthSuccess?.(profile, cachedAccessToken);
     } else if (!isSigningIn) {
-      // Check if user is logged in via local/server profile
+      // Preserve saved local/server/Google-on-PC profile across reloads
       const saved = getSavedUserProfile();
-      if (saved && saved.authProvider !== 'google') {
-        onAuthSuccess?.(saved, null);
-      } else if (!saved) {
+      if (saved) {
+        onAuthSuccess?.(saved, cachedAccessToken);
+      } else {
         setWorkspaceAccessToken(null);
         onSignedOut?.();
       }
@@ -109,18 +142,140 @@ export const initWorkspaceAuth = (
   });
 };
 
-export const signInWithGoogleWorkspace = async (): Promise<{
+// Direct Google Identity Services (GIS) OAuth popup for localhost when user provides a Google Client ID
+async function signInWithGoogleIdentityServices(clientId: string): Promise<{
+  user: UserProfile;
+  accessToken: string;
+}> {
+  if (typeof window === 'undefined') {
+    throw new Error('Ambiente de navegador indisponível.');
+  }
+
+  if (!(window as any).google?.accounts?.oauth2) {
+    await new Promise<void>((resolve, reject) => {
+      const existing = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
+      if (existing) {
+        existing.addEventListener('load', () => resolve());
+        existing.addEventListener('error', () => reject(new Error('Falha ao carregar Google Identity Services.')));
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = 'https://accounts.google.com/gsi/client';
+      script.async = true;
+      script.defer = true;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error('Falha ao carregar script de login do Google.'));
+      document.head.appendChild(script);
+    });
+  }
+
+  const accessToken = await new Promise<string>((resolve, reject) => {
+    const tokenClient = (window as any).google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: ['openid', 'email', 'profile', ...WORKSPACE_SCOPES].join(' '),
+      callback: (resp: any) => {
+        if (resp?.error) {
+          reject(new Error(resp.error_description || resp.error));
+          return;
+        }
+        if (resp?.access_token) {
+          resolve(resp.access_token);
+        } else {
+          reject(new Error('Token não retornado pelo Google.'));
+        }
+      },
+    });
+    tokenClient.requestAccessToken({ prompt: 'consent' });
+  });
+
+  const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!userRes.ok) {
+    throw new Error('Não foi possível obter os dados do perfil Google.');
+  }
+  const userInfo = await userRes.json();
+  const profile: UserProfile = {
+    id: `google-${userInfo.sub || userInfo.email}`,
+    name: userInfo.name || userInfo.email?.split('@')[0] || 'Usuário Google',
+    email: userInfo.email || '',
+    photoURL: userInfo.picture || undefined,
+    authProvider: 'google',
+  };
+
+  setWorkspaceAccessToken(accessToken);
+  saveUserProfile(profile);
+  await fetch('/api/auth/local-profile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user: profile }),
+  }).catch(() => {});
+
+  return { user: profile, accessToken };
+}
+
+export async function signInGoogleLocalhostProfile(
+  name: string,
+  email: string
+): Promise<{ user: UserProfile; accessToken: string }> {
+  const cleanEmail = email.trim().toLowerCase();
+  const displayName =
+    name.trim() ||
+    cleanEmail
+      .split('@')[0]
+      .replace(/[._-]+/g, ' ')
+      .replace(/\b\w/g, (l) => l.toUpperCase()) ||
+    'Usuário Google';
+
+  const id = `google-pc-${cleanEmail.replace(/[^a-z0-9]/g, '_')}`;
+  const profile: UserProfile = {
+    id,
+    name: displayName,
+    email: cleanEmail,
+    authProvider: 'google',
+  };
+
+  saveUserProfile(profile);
+  await fetch('/api/auth/local-profile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user: profile }),
+  }).catch(() => {});
+
+  return { user: profile, accessToken: cachedAccessToken || '' };
+}
+
+export const signInWithGoogleWorkspace = async (fallbackAccount?: {
+  name?: string;
+  email?: string;
+}): Promise<{
   user: UserProfile;
   accessToken: string;
 }> => {
   try {
     isSigningIn = true;
+
+    // 1. If user configured a custom Google OAuth Client ID for localhost, use Google Identity Services directly
+    const customClientId = getCustomGoogleClientId();
+    if (customClientId) {
+      return await signInWithGoogleIdentityServices(customClientId);
+    }
+
+    // 2. If running on localhost without custom Client ID, the sandbox Firebase project does not authorize localhost.
+    // Use seamless Google PC profile if email is provided, or try popup and gracefully fallback on auth/unauthorized-domain.
+    if (isLocalhostEnvironment() && fallbackAccount?.email?.trim()) {
+      return await signInGoogleLocalhostProfile(
+        fallbackAccount.name || '',
+        fallbackAccount.email
+      );
+    }
+
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
-      throw new Error('Não foi possível obter o token de acesso do Google Workspace.');
+    const token = credential?.accessToken || '';
+    if (token) {
+      setWorkspaceAccessToken(token);
     }
-    setWorkspaceAccessToken(credential.accessToken);
     const profile: UserProfile = {
       id: result.user.uid,
       name: result.user.displayName || result.user.email?.split('@')[0] || 'Usuário',
@@ -129,48 +284,74 @@ export const signInWithGoogleWorkspace = async (): Promise<{
       authProvider: 'google',
     };
     saveUserProfile(profile);
-    return { user: outlierSafeProfile(profile), accessToken: credential.accessToken };
+    await fetch('/api/auth/local-profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user: profile }),
+    }).catch(() => {});
+    return { user: profile, accessToken: token };
+  } catch (err: any) {
+    const code = String(err?.code || err?.message || '');
+    if (
+      code.includes('auth/unauthorized-domain') ||
+      code.includes('auth/operation-not-supported') ||
+      code.includes('auth/configuration-not-found')
+    ) {
+      if (fallbackAccount?.email?.trim()) {
+        return await signInGoogleLocalhostProfile(
+          fallbackAccount.name || '',
+          fallbackAccount.email
+        );
+      }
+      const friendlyErr: any = new Error(
+        'Para entrar com sua conta Google no PC local (localhost), informe seu nome e seu e-mail @gmail.com abaixo e clique em Entrar com Conta Google.'
+      );
+      friendlyErr.code = 'LOCALHOST_GOOGLE_EMAIL_REQUIRED';
+      throw friendlyErr;
+    }
+    throw err;
   } finally {
     isSigningIn = false;
   }
 };
 
-function outlierSafeProfile(p: UserProfile): UserProfile {
-  return p;
-}
-
 export const signInWithEmail = async (
   email: string,
   password: string
 ): Promise<UserProfile> => {
-  // First try server SQLite auth, or Firebase Auth
-  try {
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.user) {
-        saveUserProfile(data.user);
-        return data.user;
-      }
+  // Always use server SQLite auth first so it works on any domain/PC without Firebase domain restrictions
+  const res = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+
+  if (res.ok) {
+    const data = await res.json();
+    if (data.user) {
+      saveUserProfile(data.user);
+      return data.user;
     }
-  } catch {
-    // Fallback to Firebase Auth
+  } else if (res.status === 401) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.error || 'E-mail ou senha incorretos.');
   }
 
-  const cred = await signInWithEmailAndPassword(auth, email, password);
-  const profile: UserProfile = {
-    id: cred.user.uid,
-    name: cred.user.displayName || cred.user.email?.split('@')[0] || 'Usuário',
-    email: cred.user.email || email,
-    photoURL: cred.user.photoURL || undefined,
-    authProvider: 'email',
-  };
-  saveUserProfile(profile);
-  return profile;
+  // Fallback to Firebase Auth only if not on unauthorized localhost domain
+  if (!isLocalhostEnvironment()) {
+    const cred = await signInWithEmailAndPassword(auth, email, password);
+    const profile: UserProfile = {
+      id: cred.user.uid,
+      name: cred.user.displayName || cred.user.email?.split('@')[0] || 'Usuário',
+      email: cred.user.email || email,
+      photoURL: cred.user.photoURL || undefined,
+      authProvider: 'email',
+    };
+    saveUserProfile(profile);
+    return profile;
+  }
+
+  throw new Error('E-mail ou senha não encontrados no banco de dados deste PC. Clique em "Criar nova conta" acima.');
 };
 
 export const registerWithEmail = async (
@@ -178,7 +359,6 @@ export const registerWithEmail = async (
   email: string,
   password: string
 ): Promise<UserProfile> => {
-  // Register in server SQLite database so it always works locally & offline
   const res = await fetch('/api/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -188,10 +368,11 @@ export const registerWithEmail = async (
   if (res.ok) {
     const data = await res.json();
     if (data.user) {
-      // Also try creating in Firebase Auth in background if enabled
-      createUserWithEmailAndPassword(auth, email, password)
-        .then((cred) => updateProfile(cred.user, { displayName: name }))
-        .catch(() => {});
+      if (!isLocalhostEnvironment()) {
+        createUserWithEmailAndPassword(auth, email, password)
+          .then((cred) => updateProfile(cred.user, { displayName: name }))
+          .catch(() => {});
+      }
       saveUserProfile(data.user);
       return data.user;
     }

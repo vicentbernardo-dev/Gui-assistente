@@ -286,6 +286,25 @@ async function generateContentWithModelFallback(ai: GoogleGenAI, params: { conte
 
 function openNativeAppWindow(url: string) {
   if (process.platform === 'win32') {
+    // Also ensure the Desktop shortcut with custom favicon.ico exists on the user's Windows Desktop
+    try {
+      const batPath = path.resolve(__dirname, 'iniciar-gui-windows.bat');
+      const iconPath = path.resolve(__dirname, 'public', 'favicon.ico');
+      const psScript = `
+        $WshShell = New-Object -ComObject WScript.Shell;
+        $DesktopPath = [Environment]::GetFolderPath('Desktop');
+        $Shortcut = $WshShell.CreateShortcut((Join-Path $DesktopPath 'Gui Assistente.lnk'));
+        $Shortcut.TargetPath = '${batPath.replace(/'/g, "''")}';
+        $Shortcut.WorkingDirectory = '${__dirname.replace(/'/g, "''")}';
+        $Shortcut.IconLocation = '${iconPath.replace(/'/g, "''")},0';
+        $Shortcut.Description = 'Gui - Assistente de Produtividade e Agenda';
+        $Shortcut.Save();
+      `;
+      execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], () => {});
+    } catch {
+      // Ignore
+    }
+
     const edgePaths = [
       'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
       'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
@@ -512,10 +531,16 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '5mb' }));
 
-  // Serve PWA manifest, service worker, and icons directly with proper MIME types
+  // Serve PWA manifest, service worker, favicon.ico, and icons directly with proper MIME types
   const publicDir = path.resolve(__dirname, 'public');
+  app.get('/favicon.ico', (_req, res) => {
+    res.setHeader('Content-Type', 'image/x-icon');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(path.join(publicDir, 'favicon.ico'));
+  });
   app.get('/manifest.webmanifest', (_req, res) => {
     res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(publicDir, 'manifest.webmanifest'));
   });
   app.get('/sw.js', (_req, res) => {
@@ -574,8 +599,8 @@ async function startServer() {
           $Shortcut = $WshShell.CreateShortcut((Join-Path $DesktopPath 'Gui Assistente.lnk'));
           $Shortcut.TargetPath = '${batPath.replace(/'/g, "''")}';
           $Shortcut.WorkingDirectory = '${__dirname.replace(/'/g, "''")}';
-          $Shortcut.IconLocation = '${iconPath.replace(/'/g, "''")}';
-          $Shortcut.Description = 'Gui — Assistente de Produtividade & Agenda';
+          $Shortcut.IconLocation = '${iconPath.replace(/'/g, "''")},0';
+          $Shortcut.Description = 'Gui - Assistente de Produtividade e Agenda';
           $Shortcut.Save();
         `;
         execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], (err) => {
@@ -583,7 +608,7 @@ async function startServer() {
             res.status(500).json({ error: 'Não foi possível criar o atalho automaticamente.' });
             return;
           }
-          res.json({ ok: true, message: 'Atalho "Gui Assistente" criado na sua Área de Trabalho!' });
+          res.json({ ok: true, message: 'Atalho "Gui Assistente" com ícone personalizado criado na sua Área de Trabalho!' });
         });
         return;
       }

@@ -314,14 +314,34 @@ export function AgendaView({
                       )}
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => onRequestDeleteEvent(evt)}
-                      aria-label={`Excluir evento ${evt.title}`}
-                      className="w-10 h-10 rounded-full bg-[#161618] text-white flex items-center justify-center hover:bg-[#D94F48] transition-colors shrink-0"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <a
+                        href={`https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(
+                          evt.title
+                        )}&dates=${evt.date.replace(/-/g, '')}T${evt.startTime.replace(':', '')}00/${evt.date.replace(
+                          /-/g,
+                          ''
+                        )}T${evt.endTime.replace(':', '')}00&details=${encodeURIComponent(
+                          evt.description || ''
+                        )}&location=${encodeURIComponent(evt.location || '')}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="Abrir/Salvar no Google Calendar"
+                        className="h-10 px-3 rounded-full bg-white/80 text-[#161618] text-xs font-bold flex items-center gap-1.5 hover:bg-white transition-colors"
+                      >
+                        <CalendarPlus className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Google Calendar</span>
+                      </a>
+
+                      <button
+                        type="button"
+                        onClick={() => onRequestDeleteEvent(evt)}
+                        aria-label={`Excluir evento ${evt.title}`}
+                        className="w-10 h-10 rounded-full bg-[#161618] text-white flex items-center justify-center hover:bg-[#D94F48] transition-colors shrink-0"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                 );
               })}

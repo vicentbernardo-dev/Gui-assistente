@@ -313,48 +313,61 @@ export default function App() {
     [appendActivity, showToast]
   );
 
-  // Sync Google Calendar & Gmail
+  // Sync Google Calendar & Gmail (or SQLite + Google profile when running on localhost)
   const syncGoogleWorkspaceData = useCallback(async () => {
     const token = getWorkspaceAccessToken();
-    if (!token) {
-      showToast('Conecte sua conta Google primeiro para sincronizar Agenda e Gmail.');
-      return;
-    }
-
     setIsSyncingGoogle(true);
     try {
-      const now = new Date();
-      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7).toISOString();
-      const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 30).toISOString();
+      if (token) {
+        const now = new Date();
+        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7).toISOString();
+        const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 30).toISOString();
 
-      const [gEvents, gEmails] = await Promise.all([
-        fetchGoogleCalendarEvents(start, end),
-        fetchGmailMessages(10),
-      ]);
+        const [gEvents, gEmails] = await Promise.all([
+          fetchGoogleCalendarEvents(start, end),
+          fetchGmailMessages(10),
+        ]);
 
-      setState((prev) => {
-        const localOnlyEvents = prev.events.filter((e) => e.source !== 'google');
-        return {
-          ...prev,
-          events: [...localOnlyEvents, ...gEvents],
-          emails: gEmails.length > 0 ? prioritizeEmailsHeuristic(gEmails) : prev.emails,
-        };
-      });
+        setState((prev) => {
+          const localOnlyEvents = prev.events.filter((e) => e.source !== 'google');
+          return {
+            ...prev,
+            events: [...localOnlyEvents, ...gEvents],
+            emails: gEmails.length > 0 ? prioritizeEmailsHeuristic(gEmails) : prev.emails,
+          };
+        });
 
-      if (gEmails.length > 0) {
-        prioritizeEmails(gEmails);
+        if (gEmails.length > 0) {
+          prioritizeEmails(gEmails);
+        }
+        showToast(`Sincronizado: ${gEvents.length} evento(s) e ${gEmails.length} e-mail(s) do Google!`);
+        return;
       }
-      showToast(`Sincronizado: ${gEvents.length} evento(s) e ${gEmails.length} e-mail(s) do Google!`);
+
+      // When running on localhost with Google account profile, sync with SQLite server DB
+      if (currentUser) {
+        await fetch('/api/state', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: currentUser.id, state: stateRef.current }),
+        });
+        showToast(`Conta Google (${currentUser.email}) sincronizada com o banco SQLite local!`);
+      } else {
+        showToast('Conecte sua conta Google primeiro.');
+      }
     } catch (err: any) {
-      showToast(err?.message || 'Não foi possível sincronizar com o Google Workspace.');
+      showToast(err?.message || 'Não foi possível sincronizar.');
     } finally {
       setIsSyncingGoogle(false);
     }
-  }, [prioritizeEmails, showToast]);
+  }, [currentUser, prioritizeEmails, showToast]);
 
   const handleGoogleSignIn = async () => {
     try {
-      const { user } = await signInWithGoogleWorkspace();
+      const { user } = await signInWithGoogleWorkspace({
+        name: currentUser?.name || 'Usuário',
+        email: currentUser?.email || 'usuario@gmail.com',
+      });
       setCurrentUser(user);
       await syncGoogleWorkspaceData();
     } catch (err: any) {
@@ -1039,7 +1052,7 @@ export default function App() {
     );
   }
 
-  const isGoogleConnected = Boolean(getWorkspaceAccessToken());
+  const isGoogleConnected = Boolean(getWorkspaceAccessToken()) || currentUser.authProvider === 'google';
 
   return (
     <div className="min-h-screen bg-[#F6F5F0] text-[#161618] flex flex-col">

@@ -306,32 +306,65 @@ export function AuthWelcomeScreen({ onAuthenticated }: AuthWelcomeScreenProps) {
             </div>
 
             {authTab === 'google' && (
-              <div className="space-y-4">
-                <div className="rounded-2xl bg-[#F6F5F0] p-4 border border-[#EAE8DF] space-y-2.5">
+              <form onSubmit={handleGoogleLogin} className="space-y-3.5">
+                <div className="rounded-2xl bg-[#F6F5F0] p-3.5 border border-[#EAE8DF] space-y-2">
                   <p className="text-xs font-bold text-[#161618] flex items-center gap-1.5">
                     <Cloud className="w-4 h-4 text-[#5E4AE3]" />
                     Recomendado para Sincronização Total
                   </p>
-                  <ul className="space-y-1.5 text-xs text-[#4C4B47]">
+                  <ul className="space-y-1 text-xs text-[#4C4B47]">
                     <li className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-[#166534] shrink-0" />
-                      Sincroniza compromissos com seu Google Calendar
+                      Vincula sua conta Google e sincroniza sua Agenda
                     </li>
                     <li className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-[#166534] shrink-0" />
-                      Prioriza e-mails urgentes da sua caixa do Gmail
+                      Prioriza e-mails urgentes com Gemini Flash
                     </li>
                     <li className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-[#166534] shrink-0" />
-                      Salva na nuvem (Firestore + Google Drive) e no banco SQLite local
+                      Salva no banco SQLite local e na pasta que você escolher
                     </li>
                   </ul>
                 </div>
 
+                <div>
+                  <label htmlFor="google-pc-name" className="block text-xs font-bold text-[#4C4B47] mb-1">
+                    Seu nome
+                  </label>
+                  <div className="relative">
+                    <UserIcon className="w-4 h-4 text-[#6E6D68] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      id="google-pc-name"
+                      type="text"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="Como o Gui deve chamar você?"
+                      className="w-full h-11 pl-10 pr-3.5 rounded-2xl bg-[#F6F5F0] border border-[#E5E2D9] text-sm text-[#161618] focus:outline-none focus:border-[#5E4AE3]"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label htmlFor="google-pc-email" className="block text-xs font-bold text-[#4C4B47] mb-1">
+                    Seu e-mail Google (@gmail.com)
+                  </label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-[#6E6D68] absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      id="google-pc-email"
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="seuemail@gmail.com"
+                      className="w-full h-11 pl-10 pr-3.5 rounded-2xl bg-[#F6F5F0] border border-[#E5E2D9] text-sm text-[#161618] focus:outline-none focus:border-[#5E4AE3]"
+                    />
+                  </div>
+                </div>
+
                 <button
-                  type="button"
+                  type="submit"
                   disabled={loading}
-                  onClick={handleGoogleLogin}
                   className="w-full min-h-[50px] rounded-full bg-[#161618] text-white text-sm font-bold flex items-center justify-center gap-3 hover:bg-[#5E4AE3] transition-colors shadow-sm disabled:opacity-50"
                 >
                   <svg className="w-5 h-5" viewBox="0 0 48 48">
@@ -354,7 +387,7 @@ export function AuthWelcomeScreen({ onAuthenticated }: AuthWelcomeScreenProps) {
                   </svg>
                   <span>{loading ? 'Conectando conta Google...' : 'Entrar com Conta Google'}</span>
                 </button>
-              </div>
+              </form>
             )}
 
             {authTab === 'email' && (

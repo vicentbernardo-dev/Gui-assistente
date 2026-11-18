@@ -23,6 +23,7 @@ function createWindow() {
     minWidth: 380,
     minHeight: 600,
     title: 'Gui — Assistente de Produtividade & Agenda',
+    icon: path.join(__dirname, '..', 'public', 'favicon.ico'),
     backgroundColor: '#F6F5F0',
     autoHideMenuBar: true,
     webPreferences: {

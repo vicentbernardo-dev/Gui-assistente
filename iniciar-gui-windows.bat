@@ -1,9 +1,11 @@
 @echo off
 chcp 65001 >nul
+cd /d "%~dp0"
 title Gui — Assistente de Produtividade (PC Nativo)
-echo ===================================================
+
+echo =============================================================
 echo   Iniciando o Gui Assistente no seu PC...
-echo ===================================================
+echo =============================================================
 
 where node >nul 2>nul
 if %errorlevel% neq 0 (
@@ -13,25 +15,25 @@ if %errorlevel% neq 0 (
 )
 
 if not exist "node_modules" (
-  echo Instalando dependencias pela primeira vez...
-  call npm install
+  echo [1/3] Instalando dependencias pela primeira vez...
+  call npm install --legacy-peer-deps
 )
 
-echo Iniciando Banco de Dados SQLite e Servidor Local na porta 3000...
-start /B cmd /c "npm run dev"
-
-timeout /t 3 /nobreak >nul
-
-:: Abre em janela estilo Aplicativo Nativo via Edge ou Chrome
-where msedge >nul 2>nul
-if %errorlevel% equ 0 (
-  start msedge --app=http://localhost:3000
-) else (
-  start http://localhost:3000
+if exist "node_modules\esbuild\install.js" (
+  node "node_modules\esbuild\install.js" >nul 2>nul
 )
+
+if not exist "dist\index.html" (
+  echo [2/3] Preparando interface otimizada do aplicativo...
+  call npm run build
+)
+
+echo [3/3] Iniciando Banco de Dados SQLite e abrindo janela do Gui...
+echo (Mantenha esta janela aberta ou minimizada enquanto usa o aplicativo)
+echo.
+
+call npx tsx server.ts --prod --open
 
 echo.
-echo Gui Assistente esta rodando em http://localhost:3000
-echo Seu banco de dados SQLite esta salvo em .data\gui-database.sqlite
-echo Pressione qualquer tecla para encerrar quando terminar de usar...
-pause >nul
+echo O servidor foi encerrado.
+pause

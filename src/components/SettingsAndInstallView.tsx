@@ -194,11 +194,21 @@ export function SettingsAndInstallView({
     const installed = await triggerPwaInstallPrompt();
     if (installed) {
       showToast('Gui instalado como aplicativo no seu dispositivo!');
-    } else {
-      showToast(
-        'Para instalar: clique no ícone de Instalação na barra de endereço do navegador (Chrome/Edge) ou em Compartilhar > Adicionar à Tela de Início no celular.'
-      );
+      return;
     }
+    try {
+      const res = await fetch('/api/create-desktop-shortcut', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data?.message) {
+        showToast(data.message);
+        return;
+      }
+    } catch {
+      // Fallback message
+    }
+    showToast(
+      'Clique no ícone de "Instalar Gui Assistente" no canto direito da barra de endereço do seu navegador (Edge/Chrome) ou em Compartilhar > Adicionar à Tela de Início.'
+    );
   };
 
   return (

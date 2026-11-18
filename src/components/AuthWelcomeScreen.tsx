@@ -129,16 +129,32 @@ export function AuthWelcomeScreen({ onAuthenticated }: AuthWelcomeScreenProps) {
         </div>
 
         <div className="flex items-center gap-2">
-          {canInstallPwa && (
-            <button
-              type="button"
-              onClick={() => triggerPwaInstallPrompt()}
-              className="min-h-[40px] px-4 rounded-full bg-[#C4E46C] text-[#161618] text-xs font-bold flex items-center gap-1.5 hover:brightness-95 transition-all shadow-xs"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Instalar App
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={async () => {
+              const ok = await triggerPwaInstallPrompt();
+              if (ok) return;
+              try {
+                const res = await fetch('/api/create-desktop-shortcut', { method: 'POST' });
+                const data = await res.json();
+                if (res.ok && data?.message) {
+                  setError(data.message);
+                  return;
+                }
+              } catch {
+                // Ignore
+              }
+              setError(
+                canInstallPwa
+                  ? 'Confirme a instalação na janela do navegador.'
+                  : 'Dica: clique no ícone de "Instalar Gui Assistente" no canto direito da barra de endereço do seu navegador (Edge/Chrome) ou em Compartilhar > Adicionar à Tela de Início.'
+              );
+            }}
+            className="min-h-[40px] px-4 rounded-full bg-[#C4E46C] text-[#161618] text-xs font-bold flex items-center gap-1.5 hover:brightness-95 transition-all shadow-xs"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Instalar Aplicativo</span>
+          </button>
           <a
             href="/api/download-pc-bundle"
             className="min-h-[40px] px-4 rounded-full bg-white border border-[#E5E2D9] text-[#161618] text-xs font-bold flex items-center gap-1.5 hover:bg-[#161618] hover:text-white transition-colors"

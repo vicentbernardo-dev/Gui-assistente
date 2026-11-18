@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { exec, execFile, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -16,6 +16,18 @@ const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.resolve(__dirname, '.data');
 const DB_FILE = path.join(DATA_DIR, 'gui-database.sqlite');
 const STATE_FILE = path.join(DATA_DIR, 'workspace-state.json');
+
+// Ensure esbuild binary is initialized if npm skipped postinstall scripts
+const esbuildInstallScript = path.resolve(__dirname, 'node_modules', 'esbuild', 'install.js');
+const esbuildMarker = path.resolve(__dirname, 'node_modules', 'esbuild', '.gui-postinstall-done');
+if (fs.existsSync(esbuildInstallScript) && !fs.existsSync(esbuildMarker)) {
+  try {
+    spawnSync(process.execPath, [esbuildInstallScript], { cwd: path.dirname(esbuildInstallScript), stdio: 'ignore' });
+    fs.writeFileSync(esbuildMarker, 'ok', 'utf-8');
+  } catch {
+    // Ignore
+  }
+}
 
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) {
@@ -262,7 +274,6 @@ async function generateContentWithModelFallback(ai: GoogleGenAI, params: { conte
     } catch (err: any) {
       lastError = err;
       const msg = String(err?.message || '').toLowerCase();
-      // If model not found or unsupported, try next fallback model
       if (msg.includes('not found') || msg.includes('404') || msg.includes('model') || msg.includes('invalid')) {
         continue;
       }
@@ -270,6 +281,27 @@ async function generateContentWithModelFallback(ai: GoogleGenAI, params: { conte
     }
   }
   throw lastError;
+}
+
+function openNativeAppWindow(url: string) {
+  if (process.platform === 'win32') {
+    const edgePaths = [
+      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    ];
+    const foundBrowser = edgePaths.find((p) => fs.existsSync(p));
+    if (foundBrowser) {
+      exec(`start "" "${foundBrowser}" --app=${url}`);
+    } else {
+      exec(`start "" "${url}"`);
+    }
+  } else if (process.platform === 'darwin') {
+    exec(`open "${url}"`);
+  } else {
+    exec(`xdg-open "${url}"`);
+  }
 }
 
 const guiToolDeclarations: FunctionDeclaration[] = [
@@ -352,6 +384,20 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '5mb' }));
 
+  // Serve PWA manifest, service worker, and icons directly with proper MIME types
+  const publicDir = path.resolve(__dirname, 'public');
+  app.get('/manifest.webmanifest', (_req, res) => {
+    res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+    res.sendFile(path.join(publicDir, 'manifest.webmanifest'));
+  });
+  app.get('/sw.js', (_req, res) => {
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(path.join(publicDir, 'sw.js'));
+  });
+  app.use('/icons', express.static(path.join(publicDir, 'icons')));
+  app.use('/src/assets', express.static(path.resolve(__dirname, 'src', 'assets')));
+
   app.get('/api/health', (_req, res) => {
     res.json({
       ok: true,
@@ -388,6 +434,40 @@ async function startServer() {
     }
   });
 
+  // Create native desktop shortcut on Windows / Linux / macOS
+  app.post('/api/create-desktop-shortcut', (_req, res) => {
+    try {
+      if (process.platform === 'win32') {
+        const batPath = path.resolve(__dirname, 'iniciar-gui-windows.bat');
+        const iconPath = path.resolve(__dirname, 'public', 'favicon.ico');
+        const psScript = `
+          $WshShell = New-Object -ComObject WScript.Shell;
+          $DesktopPath = [Environment]::GetFolderPath('Desktop');
+          $Shortcut = $WshShell.CreateShortcut((Join-Path $DesktopPath 'Gui Assistente.lnk'));
+          $Shortcut.TargetPath = '${batPath.replace(/'/g, "''")}';
+          $Shortcut.WorkingDirectory = '${__dirname.replace(/'/g, "''")}';
+          $Shortcut.IconLocation = '${iconPath.replace(/'/g, "''")}';
+          $Shortcut.Description = 'Gui — Assistente de Produtividade & Agenda';
+          $Shortcut.Save();
+        `;
+        execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', psScript], (err) => {
+          if (err) {
+            res.status(500).json({ error: 'Não foi possível criar o atalho automaticamente.' });
+            return;
+          }
+          res.json({ ok: true, message: 'Atalho "Gui Assistente" criado na sua Área de Trabalho!' });
+        });
+        return;
+      }
+      res.json({
+        ok: true,
+        message: 'Use o botão "Instalar App" do navegador ou o script iniciar-gui-mac-linux.sh.',
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao criar atalho.' });
+    }
+  });
+
   // Save Gemini API Key from UI into SQLite & .env
   app.post('/api/settings/api-key', (req, res) => {
     try {
@@ -400,7 +480,6 @@ async function startServer() {
       setSetting('GEMINI_API_KEY', trimmed);
       process.env.GEMINI_API_KEY = trimmed;
 
-      // Also persist to local .env if writable
       try {
         const envPath = path.resolve(__dirname, '.env');
         let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
@@ -565,10 +644,9 @@ async function startServer() {
 
       syncNormalizedTables(String(userId), state);
 
-      // Keep workspace-state.json updated as well
       fs.writeFileSync(STATE_FILE, serialized, 'utf-8');
 
-      // If user configured a custom backup path on their PC, mirror the database JSON there
+      // Mirror to custom PC backup path if configured
       const customPath = state?.preferences?.customBackupPath;
       let savedCustomPath: string | null = null;
       if (customPath && typeof customPath === 'string' && customPath.trim()) {
@@ -614,7 +692,8 @@ async function startServer() {
 
   // Download full PC native copy bundle (.tar.gz)
   app.get('/api/download-pc-bundle', (_req, res) => {
-    const archivePath = path.join('/tmp', `gui-assistente-pc-${Date.now()}.tar.gz`);
+    const tmpDir = process.platform === 'win32' ? process.env.TEMP || DATA_DIR : '/tmp';
+    const archivePath = path.join(tmpDir, `gui-assistente-pc-${Date.now()}.tar.gz`);
     execFile(
       'tar',
       [
@@ -656,7 +735,7 @@ async function startServer() {
       if (!ai) {
         res.status(503).json({
           error:
-            'Chave GEMINI_API_KEY não configurada. Abra "Configurações & Integrações" no menu para inserir sua chave do Google AI Studio.',
+            'Chave GEMINI_API_KEY não configurada. Abra "Baixar App & Dados" no topo para inserir sua chave gratuita do Google AI Studio.',
         });
         return;
       }
@@ -728,7 +807,6 @@ CONTEXTO ATUAL DO USUÁRIO:
         },
       });
 
-      // Handle up to 3 tool-calling rounds cleanly
       for (let round = 0; round < 3; round++) {
         const calls = response.functionCalls;
         if (!calls || calls.length === 0) break;
@@ -944,11 +1022,17 @@ E-mails: ${JSON.stringify(compactEmails)}`,
     }
   });
 
-  if (process.env.NODE_ENV === 'production') {
-    const distPath = path.resolve(__dirname, 'dist');
+  const distPath = path.resolve(__dirname, 'dist');
+  const distIndex = path.join(distPath, 'index.html');
+  const useProdStatic =
+    process.env.NODE_ENV === 'production' ||
+    process.argv.includes('--prod') ||
+    (process.argv.includes('--open') && fs.existsSync(distIndex));
+
+  if (useProdStatic && fs.existsSync(distIndex)) {
     app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    app.use((_req, res) => {
+      res.sendFile(distIndex);
     });
   } else {
     const vite = await createViteServer({
@@ -959,7 +1043,15 @@ E-mails: ${JSON.stringify(compactEmails)}`,
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Gui Produtividade server & SQLite DB running at http://localhost:${PORT}`);
+    const url = `http://localhost:${PORT}`;
+    console.log(`\n=============================================================`);
+    console.log(`  Gui Assistente & Banco SQLite ativos em: ${url}`);
+    console.log(`  Banco de dados salvo em: ${DB_FILE}`);
+    console.log(`=============================================================\n`);
+
+    if (process.argv.includes('--open') || process.env.OPEN_BROWSER === 'true') {
+      openNativeAppWindow(url);
+    }
   });
 }
 
